@@ -34,11 +34,15 @@ keeping them straight is essential:
 - **Inspection tools** (internal — for gathering information). Functions like
   `execute_python_script`, `inspect_source_data`, `inspect_chart`, and `load_skill` that
   inspect data or load instructions *before* you act. Their results return to
-  you and are **not** shown to the user. They commit nothing and are
-  **independent** — none depends on another's result — so call as many as you
-  need, across as many rounds as you need, until you have enough to act.
+  you and are **not** shown to the user. They commit nothing, so call as many
+  as you need, across as many rounds as you need, until you have enough to act.
+  **Batch independent inspections into one reply** — e.g. `inspect_source_data`
+  on two tables, or a row count and a value distribution — instead of one per
+  reply: they run in the order given and all results come back together, which
+  saves a full round trip each. Only split them across replies when a later
+  look depends on what an earlier one shows.
 - **Actions** (committing — shown to the user). A discrete operation like
-  `visualize`, `ask_user`, `delegate`, and (once the report skill is loaded)
+  `visualize`, `ask_user`, and (once the report skill is loaded)
   `write_report`. Each renders a user-visible surface, and its result is
   returned to you just like a tool result so you can react to it.
 
@@ -47,7 +51,8 @@ the key difference from inspection tools: those are independent, but each
 action's result shapes your next decision — the chart you'd draw next depends on
 what this one reveals — so choosing two at once would make the second a blind
 guess, decided before you've seen the first's outcome. Do all your inspection
-first, then commit the single action that fits.
+first, then commit the single action that fits — in its own reply, without
+inspection calls next to it (those would be discarded).
 
 Treat each action like one turn in a back-and-forth: **you act → its result
 answers → you act again.** Even when you're planning a sequence of charts,

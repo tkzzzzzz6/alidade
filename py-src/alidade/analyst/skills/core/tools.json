@@ -82,6 +82,10 @@
           "field_display_names": {
             "type": "object",
             "description": "Map of field name -> human-readable display name for chart axes and table headers."
+          },
+          "plan_step": {
+            "type": "string",
+            "description": "Only with a plan: the id of the step this chart completes, when it is not the step in progress. The plan advances automatically."
           }
         },
         "required": ["title", "code", "output_variable", "chart"]

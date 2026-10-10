@@ -15,11 +15,16 @@ is kept in [docs/upstream/CHANGELOG.md](docs/upstream/CHANGELOG.md).
 - `ask_user` questions carry the agent's context and 2–3 options with the recommended one first.
 - Vague requests and requests for investment advice are clarified with `ask_user` (2–3 recommended options) before any chart or plan.
 - Line-chart check: more than 10 lines is a warning, more than 20 is sent back for repair.
+- Plan progress advances by itself when a chart is shown (`plan_step` names the step when it is not the one in progress), a plan change can ride along with an action, and plans start at three steps: no more LLM round trips just to tick a checklist.
+- Several inspection calls (table structure, queries) can come back in one LLM reply instead of one per reply (`ALIDADE_PARALLEL_TOOLS`, on by default); actions are still one per turn.
+- Plans can mark which steps depend on which (`ALIDADE_SUBAGENTS=1`, experimental): groundwork for parallel sub-agents.
 - Data quality check: each table in the agent's context comes with code-computed notes on duplicate rows, numbers or dates stored as text (and mixed date formats), the same label spelled differently, and missing values, each with the fix.
 
 ### Evaluation
 - `eval/`: a harness that runs a question set against a real model and compares two versions (success, chart errors, clarification, tokens, time), with one-command scripts (`eval.ps1` / `eval.bat` / `eval.sh`) and keys in `eval/.env`.
 - Token accounting: provider-reported prefix-cache hits, uncached input tokens, and tokens spent before the user confirms a direction.
+- Number provenance check (`analyst/engine/number_check.py`): every number in a conclusion is traced to the run's printed output, chart data, input tables or simple derived values; the evaluation reports how many cannot be traced, with grounding questions that invite made-up numbers. Measurement only for now.
+- Multi-angle questions (two independent analyses in one request) with duration, LLM-call and parallel-plan metrics.
 - Harder questions: dirty data (string amounts, mixed date formats, duplicates), multi-table joins, and questions that must be clarified first; numeric and multi-part answer checks.
 
 ### Interface

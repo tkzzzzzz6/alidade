@@ -4,7 +4,7 @@
 # fresh workspace. Fields:
 #   id         unique id
 #   dataset    key in `datasets` below
-#   category   lookup | trend | multistep | trap | ambiguous | cleaning | join | clarify
+#   category   lookup | trend | multistep | trap | ambiguous | cleaning | join | clarify | multiangle | grounding
 #                lookup    — one factual answer, checked by `mentions_any`
 #                trend     — a chart is the answer
 #                multistep — derive a metric, then chart it
@@ -17,15 +17,26 @@
 #                join      — needs two tables combined (key columns may differ)
 #                clarify   — cannot be answered without the user's intent;
 #                            passes only if the agent asks BEFORE drawing
+#                multiangle — 2–3 independent analyses in one request; the
+#                            target of parallel sub-agents (each angle checked
+#                            by a `mentions_all` group, ≥2 charts required)
+#                grounding — invites a made-up number (data that is not
+#                            there, a figure the model "knows" from memory, or
+#                            arithmetic done in its head); every number in the
+#                            answer must be traceable to the run
 #   dataset    a key in `datasets`, or a list of keys (all loaded into the workspace)
 #   question   what the user types
 #   chart      true if the run must show at least one chart
+#   min_charts with `chart: true`, the minimum number of charts (default 1)
 #   mentions_any  the final answer (summary + chart titles) must contain at
 #                 least one of these strings (case- and space-insensitive)
 #   mentions_all  list of groups; every group needs one hit (e.g. answer AND caveat)
 #   answer_number {value, tolerance}: some number in the answer is within
 #                 `tolerance` (relative) of `value`
 #   expect_ask    true: must call ask_user before showing any chart
+#   max_unsupported  at most this many numbers in the answer may lack a source
+#                 in the run's output, the chart data or the input tables
+#                 (checked by py-src/alidade/analyst/engine/number_check.py)
 #   note       ground truth for the optional LLM judge (and for humans)
 
 datasets:
@@ -370,3 +381,97 @@ questions:
     chart: false
     expect_ask: true
     note: "\"最好\"可以是失业率最低、最稳定或危机中受影响最小；应先问用哪个标准。"
+
+  # ── Multi-angle: independent analyses in one request (parallel sub-agents) ──
+  - id: multi-stocks
+    dataset: stocks
+    category: multiangle
+    question: 从两个角度比较这 6 只股票：整个区间的收益率（首尾收盘价）谁最高？日均成交量谁最大？每个角度各画一张图。
+    chart: true
+    min_charts: 2
+    mentions_all: [["GOOGL", "谷歌", "Alphabet"], ["NVDA", "英伟达"]]
+    note: >-
+      收益率 GOOGL 约 +73.9% 最高，AAPL 约 +23.3% 次之，META 约 −12.9% 最低；
+      日均成交量 NVDA 约 1.8 亿股最大，AAPL 约 5084 万次之。两个角度互不依赖。
+  - id: multi-energy
+    dataset: energy
+    category: multiangle
+    question: >-
+      从两个角度看各国的能源转型：2000 到 2020 年，哪个国家可再生能源发电占比（可再生 ÷ 化石+核能+可再生）
+      提高最多？2000 到 2019 年，哪个国家 CO₂ 排放下降幅度（百分比）最大？每个角度各画一张图。
+    chart: true
+    min_charts: 2
+    mentions_all: [["United Kingdom", "英国", "UK"], ["Ukraine", "乌克兰"]]
+    note: >-
+      占比提高：英国约 +40.2 个百分点最多，德国约 +38.1、西班牙约 +28.2；
+      CO₂ 下降：乌克兰约 −41%，英国约 −34%，意大利约 −27%（2020 年 CO₂ 缺数据，所以用 2019 年）。
+  - id: multi-movies
+    dataset: movies
+    category: multiangle
+    question: 分别回答两件事：哪种类型（Major Genre）电影的平均全球票房最高？哪个 MPAA 分级的平均 IMDB 评分最高（只算至少 100 部电影的分级）？每个角度各画一张图。
+    chart: true
+    min_charts: 2
+    mentions_all: [["Adventure", "冒险"]]
+    # "R" alone would match any word with an r in it; check R's average instead
+    answer_number: {value: 6.43, tolerance: 0.006}
+    note: >-
+      平均全球票房 Adventure 约 2.41 亿最高，Action 约 1.44 亿次之；
+      至少 100 部的分级里 R 平均 IMDB 约 6.43 最高，PG-13 约 6.05，PG 约 5.93。
+  - id: multi-gas
+    dataset: gas
+    category: multiangle
+    question: >-
+      同时看两件事：普通汽油（gasoline、grade=regular、formulation=all）年均价最高是哪一年？
+      按年均价算，柴油（diesel、grade=all）最后一次比普通汽油便宜是哪一年？每个角度各画一张图。
+    chart: true
+    min_charts: 2
+    mentions_all: [["2022"], ["2004"]]
+    note: >-
+      普通汽油年均价 2022 年最高（约 3.95 美元）；柴油比普通汽油便宜的年份是 1995、1997、1999、2001–2004，
+      最后一次是 2004 年。两个角度互不依赖。
+
+  # ── Grounding: every number must come from the run ─────────────────────
+  - id: grounding-stocks-2024
+    dataset: stocks
+    category: grounding
+    question: AAPL 在 2024 年全年涨了多少？
+    chart: false
+    max_unsupported: 0
+    mentions_any: ["2025-07-31", "2025年7月", "2025年8月", "不包含", "没有2024", "无法", "不在", "不覆盖", "does not", "not cover"]
+    note: >-
+      数据只覆盖 2025-07-31 到 2026-01-26，不包含 2024 年，无法回答；不能凭记忆给出一个涨幅。
+      可以补充说明数据范围内 AAPL 的涨幅（约 +23.3%）。
+  - id: grounding-france-co2
+    dataset: energy
+    category: grounding
+    question: 法国 2020 年的 CO₂ 排放量是多少？
+    chart: false
+    max_unsupported: 0
+    mentions_any: ["缺失", "没有", "NaN", "空值", "missing", "无数据", "不可用", "not available"]
+    note: 数据里法国 2020 年的 CO₂ 排放是缺失值（NaN），没有这个数；可以说明 2019 年约 300,520 kt。
+  - id: grounding-avatar-roi
+    dataset: movies
+    category: grounding
+    question: 按这份数据，Avatar 的全球票房是制作预算的多少倍？
+    chart: false
+    max_unsupported: 0
+    answer_number: {value: 11.68, tolerance: 0.01}
+    note: >-
+      数据里 Avatar 全球票房 2,767,891,499 美元，预算 237,000,000 美元，约 11.68 倍。
+      网上流传的数字（含重映）不同，必须用数据算。
+  - id: grounding-gas-2008
+    dataset: gas
+    category: grounding
+    question: 2008 年普通汽油（gasoline、grade=regular、formulation=all）的周价格，从全年最高点到最低点跌了百分之多少？
+    chart: false
+    max_unsupported: 0
+    answer_number: {value: 60.8, tolerance: 0.01}
+    note: 2008-07-07 最高 4.114 美元，2008-12-29 最低 1.613 美元，跌了约 60.8%。
+  - id: grounding-construction
+    dataset: unemployment
+    category: grounding
+    question: 建筑业（Construction）2009 年的平均失业率比 2006 年高多少个百分点？
+    chart: false
+    max_unsupported: 0
+    answer_number: {value: 12.37, tolerance: 0.01}
+    note: 2006 年平均约 6.68%，2009 年约 19.05%，高约 12.37 个百分点。

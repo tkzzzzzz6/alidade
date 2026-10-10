@@ -1,5 +1,6 @@
 """The evaluation harness's scoring helpers (eval/run_eval.py, eval/report.py)."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -144,7 +145,7 @@ def _rec(**over):
 def test_expect_ask_requires_asking_before_any_chart():
     q = {"expect_ask": True}
     assert run_eval.grade(q, _rec(asked=1, charts_before_ask=0)) == {
-        "mentions_ok": None, "clarified_first": True, "success": True}
+        "mentions_ok": None, "clarified_first": True, "grounded": None, "success": True}
     late = run_eval.grade(q, _rec(asked=1, charts_before_ask=2))
     assert late["clarified_first"] is False and late["success"] is False
     never = run_eval.grade(q, _rec(asked=0))
@@ -242,3 +243,156 @@ def test_metrics_unknown_for_old_records():
 ])
 def test_failure_reason_names_the_cause(over, expected):
     assert report._why(_run(success=False, chart_ok=True, **over)) == expected
+
+
+# ── multi-angle questions (stage 0 of the parallel sub-agent plan) ──
+
+def _questions():
+    return {q["id"]: q for q in run_eval.load_questions(EVAL_DIR / "questions.yaml")[1]}
+
+
+def test_every_reference_note_passes_its_own_checks():
+    # guards against typos in mentions_* / answer_number
+    for q in _questions().values():
+        assert run_eval.answer_ok(q, q.get("note", "")) is not False, q["id"]
+
+
+def test_multiangle_questions_check_every_angle():
+    multi = [q for q in _questions().values() if q["category"] == "multiangle"]
+    assert len(multi) >= 4
+    for q in multi:
+        assert q.get("chart") and q.get("min_charts", 1) >= 2, q["id"]
+        assert len(q.get("mentions_all") or []) + bool(q.get("answer_number")) >= 2, q["id"]
+
+
+def test_multiangle_answer_with_one_angle_fails():
+    q = _questions()["multi-stocks"]
+    assert run_eval.answer_ok(q, "GOOGL 收益率最高，NVDA 成交量最大") is True
+    assert run_eval.answer_ok(q, "GOOGL 收益率最高") is False
+    movies = _questions()["multi-movies"]
+    assert run_eval.answer_ok(movies, "Adventure 票房最高；R 级平均 6.43 分") is True
+    assert run_eval.answer_ok(movies, "Adventure 票房最高；PG-13 平均 6.05 分") is False
+
+
+def test_too_few_charts_reason():
+    r = _run(success=False, chart_ok=False, min_charts=2, charts_shown=1)
+    assert report._why(r) == "只出了 1 张图（要求至少 2 张）"
+    assert report._why(_run(success=False, chart_ok=False, charts_shown=0)) == "没有生成图表"
+
+
+def test_multi_and_subagent_metrics():
+    runs = [
+        _run(category="multiangle", duration_s=40, llm_calls=8,
+             subagents=[{"step_id": "s1", "status": "success"}, {"step_id": "s2", "status": "timeout"}]),
+        _run(category="multistep", duration_s=20, subagents=[]),
+        _run(category="lookup", duration_s=5, subagents=[]),
+    ]
+    m = report.metrics(runs)
+    assert m["avg_duration_multi"] == 30 and m["avg_duration_multiangle"] == 40
+    assert m["avg_llm_calls_multiangle"] == 8
+    assert m["subagent_run_rate"] == pytest.approx(1 / 3)
+    assert m["subagents_total"] == 2 and m["subagent_fail_rate"] == 0.5
+    old = report.metrics([_run(category="multistep")])          # records from before sub-agents
+    assert old["subagent_run_rate"] is None and old["subagent_fail_rate"] is None
+
+
+def test_plan_parallel_width():
+    def plan(*steps):
+        return {"type": "plan", "steps": list(steps)}
+
+    def st(i, status="pending", deps=(), goal=None):
+        d = {"id": i, "title": i, "status": status, "depends_on": list(deps)}
+        return {**d, "goal": goal} if goal else d
+
+    old_style = [plan({"id": "step-1", "title": "a", "status": "pending"},
+                      {"id": "step-2", "title": "b", "status": "pending"})]
+    assert run_eval.plan_parallel_width(old_style) == 1
+    flag_off = [plan(st("step-1"), st("step-2"))]                  # depends_on always [], no goals
+    assert run_eval.plan_parallel_width(flag_off) == 1
+    fan_out = [plan(st("s1", goal="x"), st("s2", goal="y"), st("s3", deps=["s1", "s2"]))]
+    assert run_eval.plan_parallel_width(fan_out) == 2
+    later = fan_out + [plan(st("s1", "done"), st("s2", "done"), st("s3", deps=["s1", "s2"]))]
+    assert run_eval.plan_parallel_width(later) == 2               # the maximum over the run
+    chain = [plan(st("a"), st("b", deps=["a"]), st("c", deps=["b"]))]
+    assert run_eval.plan_parallel_width(chain) == 1
+    assert run_eval.plan_parallel_width([{"type": "result"}]) == 0
+
+
+def test_parallel_plan_rate():
+    runs = [_run(category="multiangle", plan_parallel_width=2),
+            _run(category="multiangle", plan_parallel_width=1)]
+    assert report.metrics(runs)["parallel_plan_rate_multiangle"] == 0.5
+    assert report.metrics([_run(category="multiangle")])["parallel_plan_rate_multiangle"] is None
+
+
+# ── number provenance in the harness ──
+
+def test_grounding_questions_require_traceable_numbers():
+    qs = _questions()
+    grounding = [q for q in qs.values() if q["category"] == "grounding"]
+    assert len(grounding) >= 5 and all(q.get("max_unsupported") == 0 for q in grounding)
+    q = qs["grounding-avatar-roi"]
+    ok = _rec(summary="约 11.68 倍", number_check={"checked": 1, "unsupported": 0})
+    made_up = _rec(summary="约 11.68 倍，重映后 12.3 倍", number_check={"checked": 2, "unsupported": 1})
+    assert run_eval.grade(q, ok)["success"] is True
+    g = run_eval.grade(q, made_up)
+    assert g["grounded"] is False and g["success"] is False
+    # old records without a number check are not failed for it
+    assert run_eval.grade(q, _rec(summary="约 11.68 倍"))["grounded"] is None
+
+
+def test_evidence_collection_and_check():
+    events = [
+        {"type": "tool_result", "tool": "execute_python_script", "stdout": "gross 2767891499\nbudget 237000000"},
+        {"type": "tool_result", "tool": "load_skill", "stdout": "999.99"},          # not data
+        {"type": "result", "status": "success",
+         "content": {"result": {"content": {"rows": [{"genre": "Adventure", "gross": 241171386}]}}}},
+    ]
+    ev = run_eval.collect_evidence(events)
+    assert len(ev["printed"]) == 1 and len(ev["charts"]) == 1
+    result = run_eval.check_numbers("约 11.68 倍；冒险片均值 2.41 亿；另有 999.99", ev, raw=[], given=[])
+    assert result["checked"] == 3 and result["unsupported"] == 1
+    assert result["unsupported_items"][0]["text"] == "999.99"
+
+
+def test_table_numbers_reads_cells_text_and_stats():
+    df = pd.DataFrame({"amount": ["$1,234.50", "N/A"] * 3 + ["$1,234.50"], "n": [10, 30, 20, 20, 20, 20, 20]})
+    cells, stats = run_eval.table_numbers([df])
+    assert 1234.5 in cells and 10 in cells                            # cells, numbers inside text
+    assert 20.0 in stats and 140.0 in stats and 7.0 in stats          # mean, sum, row count
+    # the data notes the agent saw count too ("3 rows are exact duplicates …")
+    assert run_eval.data_quality_notes(df) and 3.0 in stats
+
+
+def test_recheck_numbers_from_saved_evidence(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "grounding-avatar-roi.evidence.json").write_text(json.dumps({
+        "printed": ["gross 2767891499\nbudget 237000000"], "charts": [], "given": [],
+        "summary": "约 11.68 倍",
+    }), encoding="utf-8")
+    runs = [_run(id="grounding-avatar-roi", category="grounding", summary="约 11.68 倍", charts=[],
+                 chart_ok=True, number_check={"checked": 1, "unsupported": 1})]
+    assert run_eval.recheck_numbers(tmp_path, runs) == 1
+    assert runs[0]["number_check"]["unsupported"] == 0 and runs[0]["success"] is True
+
+
+def test_number_metrics_and_reason():
+    runs = [_run(number_check={"checked": 4, "unsupported": 1,
+                               "unsupported_items": [{"text": "9.2 倍", "context": "约 9.2 倍"}]}),
+            _run(number_check={"checked": 6, "unsupported": 0}),
+            _run()]                                                    # an old record
+    m = report.metrics(runs)
+    assert m["numbers_checked"] == 10 and m["unsupported_number_rate"] == 0.1
+    assert m["runs_with_unsupported_rate"] == 0.5
+    assert report.metrics([_run()])["unsupported_number_rate"] is None
+    why = report._why(_run(success=False, chart_ok=True, grounded=False,
+                           number_check={"unsupported": 1, "unsupported_items": [{"text": "9.2 倍"}]}))
+    assert why == "结论里有 1 个找不到出处的数字（9.2 倍）"
+    assert "找不到出处的数字（人工抽查用）" in report.render_single(runs)
+
+
+def test_plan_round_metrics():
+    runs = [_run(plan_updates=3, calls_dropped=1), _run(plan_updates=1, calls_dropped=0)]
+    m = report.metrics(runs)
+    assert m["avg_plan_updates"] == 2 and m["calls_dropped"] == 1
+    assert report.metrics([_run()])["avg_plan_updates"] is None      # records from before

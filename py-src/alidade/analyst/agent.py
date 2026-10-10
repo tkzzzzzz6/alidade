@@ -37,7 +37,7 @@ from alidade.analyst.engine import checkpoints
 from alidade.analyst.engine import chart_check
 from alidade.analyst.engine.execution import CodeExecutor
 from alidade.analyst.engine.graph import RECURSION_LIMIT, AnalystGraph
-from alidade.analyst.engine.planning import MAX_PLAN_STEPS, PLAN_TOOL, PLANNING_PROMPT
+from alidade.analyst.engine.planning import plan_tool, planning_prompt
 from alidade.analyst.engine.prompts import (
     CORE_SKILL,
     SKILL_LOADED_BANNER,
@@ -245,7 +245,7 @@ class AnalystAgent:
         action tools of loaded skills."""
         return build_tools(
             self.registry.gated_skill_names(),
-            [*self.registry.tools_for(loaded), PLAN_TOOL],
+            [*self.registry.tools_for(loaded), plan_tool()],
             action_tools=self.registry.action_tools_for(loaded),
         )
 
@@ -587,7 +587,7 @@ class AnalystAgent:
             "{context_guide}": context_guide,
             "{skills_block}": skills_block,
             "{max_iterations}": str(self.max_iterations),
-            "{planning}": PLANNING_PROMPT.replace("{max_steps}", str(MAX_PLAN_STEPS)),
+            "{planning}": planning_prompt(),
             "{agent_exploration_rules}": rules_block,
         }
         prompt = SYSTEM_PROMPT

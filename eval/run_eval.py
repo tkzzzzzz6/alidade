@@ -53,6 +53,8 @@ DEFAULT_QUESTIONS = EVAL_DIR / "questions.yaml"
 DEFAULT_DEMOS = ROOT / "public" / "demos"
 DEFAULT_ENV_FILE = EVAL_DIR / ".env"
 CHART_CHECK_FILE = ROOT / "py-src" / "alidade" / "analyst" / "engine" / "chart_check.py"
+NUMBER_CHECK_FILE = ROOT / "py-src" / "alidade" / "analyst" / "engine" / "number_check.py"
+DATA_QUALITY_FILE = ROOT / "py-src" / "alidade" / "agents" / "data_quality.py"
 
 FALLBACK_ANSWER = "按你推荐的方向继续，不用再问我。"
 
@@ -253,6 +255,130 @@ def chart_checker():
     return _CHART_CHECK
 
 
+_NUMBER_CHECK = None
+
+
+def number_checker():
+    """The current number-provenance check, loaded by path so it also works
+    when the engine under test is the pre-change package."""
+    global _NUMBER_CHECK
+    if _NUMBER_CHECK is None:
+        spec = importlib.util.spec_from_file_location("_eval_number_check", NUMBER_CHECK_FILE)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        _NUMBER_CHECK = mod
+    return _NUMBER_CHECK
+
+
+_DATA_QUALITY = None
+
+
+def data_quality_notes(df: Any) -> list[str]:
+    """The table notes the current engine shows the agent (loaded by path)."""
+    global _DATA_QUALITY
+    if _DATA_QUALITY is None:
+        spec = importlib.util.spec_from_file_location("_eval_data_quality", DATA_QUALITY_FILE)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        _DATA_QUALITY = mod
+    try:
+        return _DATA_QUALITY.data_quality_notes(df)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+RAW_VALUE_CAP = 300_000
+
+
+def table_numbers(frames: list[Any]) -> tuple[list[float], list[float]]:
+    """Numbers the agent may legitimately quote from its input tables.
+
+    Returns (cells, column statistics). Cells include numbers written inside
+    text columns (``"$1,234.50"``) so a raw export counts too.
+    """
+    import pandas as pd
+    nc = number_checker()
+    cells: list[float] = []
+    stats: list[float] = []
+    for df in frames:
+        for col in df.columns:
+            s = df[col]
+            if pd.api.types.is_bool_dtype(s):
+                continue
+            if pd.api.types.is_numeric_dtype(s):
+                v = pd.to_numeric(s, errors="coerce").dropna()
+                cells.extend(v.abs().tolist()[:RAW_VALUE_CAP])
+                if len(v):
+                    stats.extend(abs(float(x)) for x in (v.min(), v.max(), v.mean(), v.median(), v.sum()))
+            elif s.dtype == object or pd.api.types.is_string_dtype(s):
+                uniq = s.dropna().astype(str).unique()[:20_000]
+                cells.extend(nc.numbers_in("\n".join(uniq))[:RAW_VALUE_CAP])
+        stats.append(float(len(df)))
+        # numbers in the data notes the agent saw ("87 rows are exact duplicates")
+        stats.extend(nc.numbers_in("\n".join(data_quality_notes(df))))
+    return cells[:RAW_VALUE_CAP * 2], stats
+
+
+def collect_evidence(events: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """What the run produced: printed tool output and the data behind each chart."""
+    printed = [str(e.get("stdout") or "") for e in events
+               if e.get("type") == "tool_result" and e.get("tool") in ("execute_python_script", "inspect_source_data")]
+    charts = []
+    for e in events:
+        if e.get("type") == "result" and e.get("status") == "success":
+            res = (e.get("content") or {}).get("result") or {}
+            rows = (res.get("content") or {}).get("rows") or []
+            charts.append(json.dumps(rows[:5000], ensure_ascii=False, default=str))
+    return {"printed": printed, "charts": charts}
+
+
+def check_numbers(summary: str, evidence: dict[str, list[str]], raw: list[float],
+                  given: list[float]) -> dict[str, Any]:
+    nc = number_checker()
+    printed = [v for t in evidence.get("printed", []) for v in nc.numbers_in(t)]
+    charted = [v for t in evidence.get("charts", []) for v in nc.numbers_in(t)]
+    ev = nc.Evidence(computed=charted, printed=printed, raw=raw, given=given)
+    return nc.check(summary, ev).to_dict()
+
+
+def recheck_numbers(run_dir: Path, runs: list[dict[str, Any]]) -> int:
+    """Re-run the number check on saved runs (after changing number_check.py).
+
+    Uses ``logs/<id>_<n>.evidence.json`` written during the run, plus the
+    input tables re-loaded from questions.yaml. Returns how many were updated.
+    """
+    datasets, questions = load_questions(DEFAULT_QUESTIONS)
+    by_id = {q["id"]: q for q in questions}
+    demos = Path(DEFAULT_DEMOS)
+    raw_cache: dict[str, tuple[list[float], list[float]]] = {}
+    seen: dict[str, int] = {}
+    updated = 0
+    for r in runs:
+        q = by_id.get(r.get("id"))
+        seen[r.get("id")] = seen.get(r.get("id"), 0) + 1
+        if not q:
+            continue
+        tag = f"{r['id']}_{seen[r['id']]}"
+        files = [run_dir / "logs" / f"{tag}.evidence.json", run_dir / "logs" / f"{r['id']}.evidence.json"]
+        ev_file = next((f for f in files if f.exists()), None)
+        if ev_file is None:
+            continue
+        ev = json.loads(ev_file.read_text(encoding="utf-8"))
+        key = "+".join(dataset_keys(q))
+        if key not in raw_cache:
+            raw_cache[key] = table_numbers([load_table(datasets[k], demos) for k in dataset_keys(q)])
+        raw, stats = raw_cache[key]
+        given = [*(ev.get("given") or []), *stats]
+        r["number_check"] = check_numbers(ev.get("summary") or r.get("summary") or "", ev, raw, given)
+        r.update(grade(q, r))
+        updated += 1
+    return updated
+
+
 def judge_chart(result_event: dict[str, Any]) -> dict[str, Any]:
     import pandas as pd
     res = (result_event.get("content") or {}).get("result") or {}
@@ -352,9 +478,15 @@ def grade(q: dict[str, Any], rec: dict[str, Any]) -> dict[str, Any]:
     if q.get("expect_ask"):
         # must ask before drawing anything — the point is not to guess
         clarified = bool(rec.get("asked")) and rec.get("charts_before_ask", 0) == 0
+    grounded = None
+    limit = q.get("max_unsupported")
+    unsupported = (rec.get("number_check") or {}).get("unsupported")
+    if limit is not None and isinstance(unsupported, int):
+        # every number in the answer must come from the run (or the data)
+        grounded = unsupported <= int(limit)
     success = (bool(rec.get("completed")) and bool(rec.get("chart_ok", True))
-               and answer is not False and clarified is not False)
-    return {"mentions_ok": answer, "clarified_first": clarified, "success": success}
+               and answer is not False and clarified is not False and grounded is not False)
+    return {"mentions_ok": answer, "clarified_first": clarified, "grounded": grounded, "success": success}
 
 
 def make_agent(pkg: str, client: Any, workspace: Any, args: argparse.Namespace):
@@ -377,8 +509,11 @@ def run_question(q: dict[str, Any], datasets: list[dict[str, Any]], args: argpar
 
     tmp = Path(tempfile.mkdtemp(prefix="alidade-eval-"))
     workspace = ws_mod.Workspace("eval-user", root_dir=tmp / "ws")
+    frames = []
     for ds in datasets:
-        workspace.write_parquet(load_table(ds, Path(args.demos)), ds["table"])
+        df = load_table(ds, Path(args.demos))
+        frames.append(df)
+        workspace.write_parquet(df, ds["table"])
 
     base_kwargs: dict[str, Any] = {"input_tables": [{"name": ds["table"]} for ds in datasets]}
     run_params = inspect.signature(make_agent(pkg, client, workspace, args).run).parameters
@@ -424,7 +559,44 @@ def run_question(q: dict[str, Any], datasets: list[dict[str, Any]], args: argpar
     usage = METER.to_dict()
     usage["tokens_before_ask"] = tokens_before_ask
 
-    return score(q, events, asks, usage, duration, error, client, args)
+    record = score(q, events, asks, usage, duration, error, client, args)
+    try:
+        raw, stats = table_numbers(frames)
+        nc = number_checker()
+        given = [*stats, *nc.numbers_in(q["question"]), *[v for a in asks for v in nc.numbers_in(a["answer"])]]
+        evidence = collect_evidence(events)
+        record["number_check"] = check_numbers(record.get("summary_full") or record["summary"], evidence, raw, given)
+        # written next to the log (not to runs.jsonl) so the check can be re-run later
+        record["_evidence"] = {**evidence, "given": given, "summary": record.get("summary_full") or ""}
+    except Exception as exc:  # noqa: BLE001 — measurement must never fail a run
+        record["number_check"] = {"error": f"{type(exc).__name__}: {exc}"[:300]}
+    record.pop("summary_full", None)
+    record.update(grade(q, record))
+    return record
+
+
+def plan_parallel_width(events: list[dict[str, Any]]) -> int:
+    """Most plan steps that could have run at the same time.
+
+    Counts, for each ``plan`` event, the unfinished steps whose dependencies
+    are all finished, and keeps the maximum. Plans without ``depends_on`` (the
+    old engine, or sub-agents off) count as sequential: width 1.
+    """
+    width = 0
+    for e in events:
+        steps = e.get("steps") if e.get("type") == "plan" else None
+        if not steps:
+            continue
+        # the model filled in the dependency fields (ids it depends on, or goals)
+        dependency_aware = any(st.get("depends_on") or st.get("goal") for st in steps)
+        if not dependency_aware:
+            width = max(width, 1)
+            continue
+        status = {st.get("id"): st.get("status") for st in steps}
+        open_steps = [st for st in steps if st.get("status") not in ("done", "skipped")
+                      and all(status.get(d) in ("done", "skipped") for d in st.get("depends_on") or [])]
+        width = max(width, len(open_steps))
+    return width
 
 
 def score(q, events, asks, usage, duration, error, client, args) -> dict[str, Any]:
@@ -441,7 +613,9 @@ def score(q, events, asks, usage, duration, error, client, args) -> dict[str, An
     errors = [e.get("message") for e in events if e.get("type") == "error"]
 
     completed = status == "success" and error is None
-    chart_ok = (len(charts) > 0) if q.get("chart") else True
+    chart_ok = (len(charts) >= int(q.get("min_charts", 1))) if q.get("chart") else True
+    subagents = [{k: e.get(k) for k in ("step_id", "status", "duration_s", "tokens")}
+                 for e in events if e.get("type") == "subagent" and e.get("status") != "started"]
     first_ask = next((i for i, e in enumerate(events) if e.get("type") == "interact"), None)
     charts_before_ask = sum(1 for e in (events if first_ask is None else events[:first_ask])
                             if e.get("type") == "result" and e.get("status") == "success")
@@ -453,11 +627,14 @@ def score(q, events, asks, usage, duration, error, client, args) -> dict[str, An
         "id": q["id"], "dataset": "+".join(dataset_keys(q)), "category": q["category"],
         "engine": args.package, "model": args.model,
         "success": success, "completed": completed, "status": status,
-        "chart_required": bool(q.get("chart")), "chart_ok": chart_ok, "mentions_ok": mention,
+        "chart_required": bool(q.get("chart")), "min_charts": int(q.get("min_charts", 1)), "chart_ok": chart_ok, "mentions_ok": mention,
         "error": error or (errors[-1] if errors and not completed else None),
         "duration_s": round(duration, 1), **usage,
         "actions": types.count("action"), "tool_calls": types.count("tool_start"),
         "plan_used": "plan" in types,
+        "plan_updates": sum(1 for e in events if e.get("type") == "tool_start" and e.get("tool") == "update_plan"),
+        "calls_dropped": sum(len(e.get("dropped") or []) for e in events if e.get("type") == "calls_dropped"),
+        "plan_parallel_width": plan_parallel_width(events),
         "charts": charts, "charts_shown": len(charts),
         "charts_blocking_final": sum(1 for c in charts if c["blocking"]),
         "self_check_triggered": sum(1 for c in checks if c.get("status") == "retrying" and c.get("attempt") == 1),
@@ -467,8 +644,10 @@ def score(q, events, asks, usage, duration, error, client, args) -> dict[str, An
         "asks": asks, "asked": len(asks),
         "charts_before_ask": charts_before_ask if asks else None,
         "expect_ask": bool(q.get("expect_ask")), "clarified_first": graded["clarified_first"],
+        "subagents": subagents,
         "compressions": [{k: c.get(k) for k in ("tokens_before", "tokens_after", "budget", "mode")} for c in compress],
         "summary": summary[:2000],
+        "summary_full": summary,
         "question": q["question"],
     }
     if args.judge:
@@ -576,6 +755,10 @@ def worker_main(args: argparse.Namespace) -> int:
     datasets, questions = load_questions(Path(args.questions))
     q = next(x for x in questions if x["id"] == args.worker)
     record = run_question(q, [datasets[k] for k in dataset_keys(q)], args)
+    evidence = record.pop("_evidence", None)
+    if evidence is not None:   # kept for re-checking numbers later without re-running
+        Path(args.worker_out).with_suffix(".evidence.json").write_text(
+            json.dumps(evidence, ensure_ascii=False, default=str), encoding="utf-8")
     Path(args.worker_out).write_text(json.dumps(record, ensure_ascii=False, default=str), encoding="utf-8")
     return 0
 

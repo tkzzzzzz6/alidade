@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from types import SimpleNamespace
@@ -119,14 +120,27 @@ def is_transient_error(exc: Exception) -> bool:
     return any(kw in name for kw in ("timeout", "ratelimit", "connection"))
 
 
+def parallel_tools_enabled() -> bool:
+    """Whether one response may carry several tool calls (default: yes).
+
+    Several *inspection* calls in one response save a full LLM round trip each
+    (the whole prompt is re-sent on every call). Actions stay one per turn
+    regardless: the graph's first-wins guard in ``_commit_action`` keeps the
+    first action and drops the rest. ``ALIDADE_PARALLEL_TOOLS=0`` restores the
+    old one-call-per-response behaviour.
+    """
+    return os.environ.get("ALIDADE_PARALLEL_TOOLS", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def open_stream(client: Any, messages: list[dict], tools: list[dict]):
     """Open a streaming LLM call with tools, retrying transient errors before
     any token is consumed.
 
-    ``parallel_tool_calls=False`` forces one tool call per response — the
-    structural backstop for the one-action-per-turn rule. Providers that do not
-    support the flag drop it (LiteLLM ``drop_params``); the graph's first-wins
-    cardinality guard remains as a second net.
+    By default the provider may return several tool calls in one response (see
+    ``parallel_tools_enabled``); the flag is then simply omitted, since that is
+    every provider's default. When disabled, ``parallel_tool_calls=False``
+    forces one call per response; providers without the flag drop it (LiteLLM
+    ``drop_params``).
     """
     last_exc: Exception | None = None
     for attempt in range(MAX_LLM_RETRIES):
@@ -135,8 +149,9 @@ def open_stream(client: Any, messages: list[dict], tools: list[dict]):
                 "tools": tools,
                 "stream": True,
                 "reasoning_effort": reasoning_effort_for(AGENT_ID, client.model),
-                "parallel_tool_calls": False,
             }
+            if not parallel_tools_enabled():
+                kwargs["parallel_tool_calls"] = False
             return client.get_completion_with_tools(messages, **kwargs)
         except Exception as e:  # noqa: BLE001 — classified below
             last_exc = e

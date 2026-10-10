@@ -241,6 +241,11 @@ class AnalystGraph:
         rlog = self.agent._reasoning_log
         chosen = action_calls[0]
         name = chosen["function"]["name"]
+        # A plan change may ride along with the action (it commits nothing the
+        # user has to wait for); any other inspection call next to an action
+        # is dropped, since the action could not have used its result.
+        plan_calls = [tc for tc in readonly_calls if tc["function"]["name"] == "update_plan"]
+        readonly_calls = [tc for tc in readonly_calls if tc["function"]["name"] != "update_plan"]
         dropped_actions = [tc["function"]["name"] for tc in action_calls[1:]]
         dropped_readonly = [tc["function"]["name"] for tc in readonly_calls]
 
@@ -253,7 +258,20 @@ class AnalystGraph:
         llm.rescue_unpack_json_strings(args)
         args["action"] = name
 
-        messages.append(llm.assistant_message(content, [chosen], resp.reasoning_content))
+        messages.append(llm.assistant_message(content, [*plan_calls, chosen], resp.reasoning_content))
+        new_plan = None
+        for tc in plan_calls:
+            try:
+                plan_args = json.loads(tc["function"]["arguments"] or "{}")
+            except json.JSONDecodeError:
+                plan_args = {}
+            new_plan = planning.normalize_steps((plan_args or {}).get("steps") if isinstance(plan_args, dict) else None)
+            summary = planning.summarize_plan(new_plan)
+            write({"type": "tool_start", "tool": "update_plan"})
+            write({"type": "plan", "steps": new_plan})
+            write({"type": "tool_result", "tool": "update_plan", "status": "ok", "stdout": summary})
+            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": summary})
+        plan_update = {} if new_plan is None else {"plan": new_plan}
 
         missing = [f for f in self.registry.action_required_fields(name) if not args.get(f)]
         if missing:
@@ -267,10 +285,11 @@ class AnalystGraph:
                      latency_ms=0, status="error")
             write({"type": "tool_result", "tool": name, "status": "error",
                    "error": f"Missing fields: {', '.join(missing)}"})
-            return {"route": "agent", "messages": messages, "tool_rounds": tool_rounds}
+            return {"route": "agent", "messages": messages, "tool_rounds": tool_rounds, **plan_update}
 
         messages.append({"role": "tool", "tool_call_id": chosen["id"], "content": ""})
         if dropped_actions or dropped_readonly:
+            write({"type": "calls_dropped", "kept": name, "dropped": dropped_actions + dropped_readonly})
             parts = []
             if dropped_actions:
                 parts.append(f"additional action call(s) ({', '.join(dropped_actions)})")
@@ -288,6 +307,7 @@ class AnalystGraph:
         rlog.log("tool_execution", iteration=cycles + 1, tool=name,
                  input_summary="action_committed", output_summary="ok", latency_ms=0, status="ok")
         return {
+            **plan_update,
             "route": "act",
             "messages": messages,
             "pending_action": {
@@ -458,6 +478,7 @@ class AnalystGraph:
             return {**update, "messages": messages, "route": "agent"}
 
         completed_steps = list(state.get("completed_steps") or [])
+        charts_before = len(completed_steps)
         suppress = (state.get("streamed_channels") or {}).get(tool_call_id or "")
         agent._begin_payload(state)
         agent._write = write
@@ -471,6 +492,15 @@ class AnalystGraph:
         )
         if observation is not None and agent._chart_check_note:
             observation = f"{observation}\n\n{agent._chart_check_note}"
+        if name == "visualize" and len(completed_steps) > charts_before:
+            # a chart was shown: advance the plan here instead of spending an
+            # LLM round on an update_plan call
+            advanced = planning.advance_plan(state.get("plan") or [], (pending.get("args") or {}).get("plan_step"))
+            if advanced is not None:
+                write({"type": "plan", "steps": advanced})
+                update["plan"] = advanced
+                if observation is not None:
+                    observation = f"{observation}\n\n[PLAN] {planning.summarize_plan(advanced)}"
         _set_observation(messages, tool_call_id, observation)
         update.update({"messages": messages, "completed_steps": completed_steps,
                        "charts": agent._end_payload(), "tool_rounds": 0,
@@ -515,6 +545,9 @@ class AnalystGraph:
                 message_code="agent.llmApiError",
             ))
             return {}
+        closed = planning.close_plan(state.get("plan") or []) if status == "success" else None
+        if closed is not None:
+            write({"type": "plan", "steps": closed})
         content: dict[str, Any] = {
             "summary": state.get("final_text", ""),
             "total_steps": len(state.get("completed_steps") or []),
@@ -528,7 +561,7 @@ class AnalystGraph:
             "run_id": state.get("run_id", ""),
             "content": content,
         })
-        return {}
+        return {"plan": closed} if closed is not None else {}
 
 
 def _route(state: AnalystState) -> str:

@@ -112,6 +112,10 @@ export interface AgentPlanStep {
     id: string;
     title: string;
     status: 'pending' | 'in_progress' | 'done' | 'skipped';
+    /** ids of the steps this one needs (only with sub-agents enabled) */
+    depends_on?: string[];
+    /** self-contained task text for a sub-agent */
+    goal?: string;
 }
 
 /** A finding of the analyst's rule-based chart self-check. */

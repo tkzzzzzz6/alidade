@@ -29,15 +29,22 @@ CATEGORY_NAMES = {
     "clarify": "必须先澄清",
     "cleaning": "数据清洗",
     "join": "多表关联",
+    "multiangle": "多角度分析",
+    "grounding": "数字溯源",
 }
 VAGUE = {"ambiguous", "clarify"}
+MULTI = {"multistep", "multiangle"}   # where parallel sub-agents should pay off
 
 
-def load_runs(path: str | Path, rescore: bool = True) -> list[dict[str, Any]]:
+def load_runs(path: str | Path, rescore: bool = True, recheck_numbers: bool = False) -> list[dict[str, Any]]:
     path = Path(path)
     file = path / "runs.jsonl" if path.is_dir() else path
     with open(file, encoding="utf-8") as fh:
         runs = [json.loads(line) for line in fh if line.strip()]
+    if recheck_numbers:
+        import run_eval
+        n = run_eval.recheck_numbers(file.parent, runs)
+        print(f"[number check] re-checked {n} of {len(runs)} runs in {file.parent}", file=sys.stderr)
     return rescore_runs(runs) if rescore else runs
 
 
@@ -100,6 +107,14 @@ def metrics(runs: list[dict[str, Any]]) -> dict[str, Any]:
                         else _mean([r.get("tokens_before_ask") if r.get("asked") else r.get("total_tokens")
                                     for r in ambiguous]))
 
+    multi = [r for r in ran if r.get("category") in MULTI]
+    multiangle = [r for r in ran if r.get("category") == "multiangle"]
+    subagents = [s for r in ran for s in r.get("subagents") or []]
+
+    checked_runs = [r for r in ran if isinstance((r.get("number_check") or {}).get("checked"), int)]
+    n_checked = sum(r["number_check"]["checked"] for r in checked_runs)
+    n_unsupported = sum(r["number_check"]["unsupported"] for r in checked_runs)
+
     by_cat: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in runs:
         by_cat[r.get("category", "?")].append(r)
@@ -129,6 +144,10 @@ def metrics(runs: list[dict[str, Any]]) -> dict[str, Any]:
                                        if cache_runs else None),
         "avg_duration_s": _mean([r.get("duration_s") for r in ran]),
         "plan_rate": _rate(sum(1 for r in ran if r.get("plan_used")), len(ran)),
+        "avg_plan_updates": (_mean([r.get("plan_updates") for r in ran])
+                             if all("plan_updates" in r for r in ran) and ran else None),
+        "calls_dropped": (sum(r.get("calls_dropped", 0) for r in ran)
+                          if all("calls_dropped" in r for r in ran) and ran else None),
         "ask_rate_ambiguous": _rate(sum(1 for r in ambiguous if r.get("asked")), len(ambiguous)),
         # needs the event order, recorded since the clarify questions were added
         "ask_first_rate_ambiguous": (None if any("charts_before_ask" not in r for r in ambiguous) else
@@ -143,6 +162,20 @@ def metrics(runs: list[dict[str, Any]]) -> dict[str, Any]:
                                 sum(1 for r in ran if r.get("category") not in VAGUE)),
         "asks_total": len(asks),
         "ask_options_rate": _rate(asks_with_options, len(asks)),
+        "avg_duration_multi": _mean([r.get("duration_s") for r in multi]),
+        "avg_duration_multiangle": _mean([r.get("duration_s") for r in multiangle]),
+        "avg_llm_calls_multiangle": _mean([r.get("llm_calls") for r in multiangle]),
+        "parallel_plan_rate_multiangle": (_rate(sum(1 for r in multiangle if (r.get("plan_parallel_width") or 0) >= 2),
+                                                len(multiangle))
+                                          if multiangle and all("plan_parallel_width" in r for r in multiangle) else None),
+        "subagent_run_rate": (_rate(sum(1 for r in ran if r.get("subagents")), len(ran))
+                              if any("subagents" in r for r in ran) else None),
+        "subagents_total": len(subagents),
+        "subagent_fail_rate": _rate(sum(1 for s in subagents if s.get("status") != "success"), len(subagents)),
+        "numbers_checked": n_checked if checked_runs else None,
+        "unsupported_number_rate": _rate(n_unsupported, n_checked) if checked_runs else None,
+        "runs_with_unsupported_rate": (_rate(sum(1 for r in checked_runs if r["number_check"]["unsupported"]),
+                                             len(checked_runs)) if checked_runs else None),
         "compressed_runs": sum(1 for r in ran if r.get("compressions")),
         "compression_avg_before": _mean([c.get("tokens_before") for c in compressions]),
         "compression_avg_after": _mean([c.get("tokens_after") for c in compressions]),
@@ -192,6 +225,8 @@ ROWS: list[tuple[str, str, Callable[[Any], str], int]] = [
     ("平均未命中缓存的输入 token", "avg_uncached_prompt_tokens", num, -1),
     ("平均耗时（秒）", "avg_duration_s", num, -1),
     ("使用计划（update_plan）的比例", "plan_rate", pct, 0),
+    ("平均 update_plan 调用次数", "avg_plan_updates", num, -1),
+    ("和动作一起被丢弃的工具调用（总数）", "calls_dropped", cnt, -1),
     ("模糊/需澄清题：反问的比例", "ask_rate_ambiguous", pct, +1),
     ("模糊/需澄清题：出图前先反问的比例", "ask_first_rate_ambiguous", pct, +1),
     ("必须先澄清的题：做到的比例", "clarify_success_rate", pct, +1),
@@ -201,6 +236,16 @@ ROWS: list[tuple[str, str, Callable[[Any], str], int]] = [
     ("明确问题：平均总 token", "avg_tokens_clear", num, -1),
     ("明确问题中反问的比例", "ask_rate_clear", pct, -1),
     ("反问带 ≥2 个选项的比例", "ask_options_rate", pct, +1),
+    ("多步/多角度题：平均耗时（秒）", "avg_duration_multi", num, -1),
+    ("多角度题：平均耗时（秒）", "avg_duration_multiangle", num, -1),
+    ("多角度题：平均 LLM 调用数", "avg_llm_calls_multiangle", num, -1),
+    ("多角度题：计划里有可并行步骤的比例", "parallel_plan_rate_multiangle", pct, 0),
+    ("使用子 Agent 的题目比例", "subagent_run_rate", pct, 0),
+    ("子 Agent 总数", "subagents_total", cnt, 0),
+    ("子 Agent 失败率", "subagent_fail_rate", pct, -1),
+    ("结论中检查的数字个数", "numbers_checked", cnt, 0),
+    ("结论中找不到出处的数字比例", "unsupported_number_rate", pct, -1),
+    ("含找不到出处数字的回答比例", "runs_with_unsupported_rate", pct, -1),
     ("触发上下文压缩的题数", "compressed_runs", cnt, 0),
     ("压缩前平均 token", "compression_avg_before", num, 0),
     ("压缩后平均 token", "compression_avg_after", num, 0),
@@ -225,6 +270,17 @@ def render_single(runs: list[dict[str, Any]]) -> str:
         lines += ["", "## 未通过的题", "", "| 题目 | 原因 |", "|---|---|"]
         for r in failures:
             lines.append(f"| {r['id']} | {_why(r)} |")
+    unsupported = [(r["id"], item) for r in runs
+                   for item in (r.get("number_check") or {}).get("unsupported_items", [])]
+    if unsupported:
+        lines += ["", "## 找不到出处的数字（人工抽查用）", "",
+                  "是否真的是编造，还是检查规则漏掉了合理的写法，需要对照 `logs/` 里的原文判断。", "",
+                  "| 题目 | 数字 | 上下文 |", "|---|---|---|"]
+        for qid, item in unsupported[:30]:
+            ctx = str(item.get("context", "")).replace("|", "/")
+            lines.append(f"| {qid} | {item.get('text')} | {ctx} |")
+        if len(unsupported) > 30:
+            lines.append(f"| … | 共 {len(unsupported)} 个 | |")
     if m["estimated_token_calls"]:
         lines += ["", f"> 注：{m['estimated_token_calls']} 次调用的服务商没有返回 usage，token 为估算值。"]
     return "\n".join(lines)
@@ -236,9 +292,16 @@ def _why(r: dict[str, Any]) -> str:
     if not r.get("completed"):
         return f"未正常结束（{r.get('status')}）"
     if not r.get("chart_ok"):
+        need = r.get("min_charts") or 1
+        if need > 1 and r.get("charts_shown"):
+            return f"只出了 {r.get('charts_shown')} 张图（要求至少 {need} 张）"
         return "没有生成图表"
     if r.get("mentions_ok") is False:
         return "结论与标准答案不符"
+    nc = r.get("number_check") or {}
+    if r.get("grounded") is False:
+        items = "、".join(i.get("text", "") for i in nc.get("unsupported_items", [])[:3])
+        return f"结论里有 {nc.get('unsupported')} 个找不到出处的数字（{items}）"
     if r.get("clarified_first") is False:
         if not r.get("asked"):
             return "没有先反问就直接分析"
@@ -291,12 +354,15 @@ def main() -> int:
     p.add_argument("runs", nargs="+", help="one or two result directories (or runs.jsonl files)")
     p.add_argument("--labels", nargs=2, default=None)
     p.add_argument("--out", default="")
+    p.add_argument("--recheck-numbers", action="store_true",
+                   help="re-run the number-provenance check on saved runs (after changing number_check.py)")
     args = p.parse_args()
+    load = lambda path: load_runs(path, recheck_numbers=args.recheck_numbers)  # noqa: E731
     if len(args.runs) == 1:
-        text = render_single(load_runs(args.runs[0]))
+        text = render_single(load(args.runs[0]))
     elif len(args.runs) == 2:
         labels = args.labels or (Path(args.runs[0]).name, Path(args.runs[1]).name)
-        text = render_compare(load_runs(args.runs[0]), load_runs(args.runs[1]), labels)
+        text = render_compare(load(args.runs[0]), load(args.runs[1]), labels)
     else:
         p.error("give one or two result directories")
     print(text)
