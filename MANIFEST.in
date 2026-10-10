@@ -1,0 +1,5 @@
+include py-src/alidade/dist/*
+include py-src/alidade/dist/assets/*
+recursive-include py-src/alidade/data_loader/guides *.md
+global-exclude .DS_Store
+exclude py-src/examples

@@ -1,0 +1,25 @@
+{
+  "short_name": "Alidade",
+  "name": "Alidade",
+  "icons": [
+    {
+      "src": "alidade-logo-128.png",
+      "type": "image/png",
+      "sizes": "128x128"
+    },
+    {
+      "src": "alidade-logo-512.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    },
+    {
+      "src": "alidade-icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#1F3A5F",
+  "background_color": "#ffffff"
+}

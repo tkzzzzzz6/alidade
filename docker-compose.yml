@@ -1,0 +1,27 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# Docker Compose configuration for Alidade.
+#
+# Quick start:
+#   1. Copy .env.template to .env and fill in your API keys.
+#   2. docker compose up --build
+#   3. Open http://localhost:5567 in your browser.
+
+services:
+  alidade:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: alidade:latest
+    ports:
+      - "5567:5567"
+    env_file:
+      - .env
+    volumes:
+      # Persist workspace data (uploaded files, sessions, etc.) across container restarts.
+      - alidade_home:/home/appuser/.alidade
+    restart: unless-stopped
+
+volumes:
+  alidade_home:
