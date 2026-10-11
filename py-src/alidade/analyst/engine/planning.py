@@ -47,6 +47,7 @@ _PLAN_TOOL_BASE: dict[str, Any] = {
             "distinct analyses or charts. Step statuses advance by themselves as charts are "
             "shown, so call it again only to add, remove, reorder or skip steps — always "
             "sending the full list. Skip it for requests answered by one or two charts."
+            # (with sub-agents, plan_tool() swaps in the two-independent-analyses rule)
         ),
         "parameters": {
             "type": "object",
@@ -103,6 +104,13 @@ def plan_tool(with_dependencies: bool | None = None) -> dict[str, Any]:
     if not with_dependencies:
         return _PLAN_TOOL_BASE
     tool = copy.deepcopy(_PLAN_TOOL_BASE)
+    tool["function"]["description"] = (
+        "Create or change your analysis plan (shown to the user as a checklist). Use it FIRST, "
+        "before any other tool, when the request needs two or more analyses that do not need "
+        "each other's results, or three or more in total — independent steps are worked on at "
+        "the same time. Step statuses advance by themselves as charts are shown, so call it "
+        "again only to add, remove, reorder or skip steps — always sending the full list. Skip "
+        "it for requests answered by one chart.")
     item = tool["function"]["parameters"]["properties"]["steps"]["items"]
     item["properties"] = {**_DEPENDENCY_FIELDS, **item["properties"]}
     item["required"] = ["id", "title", "status", "depends_on"]
@@ -114,32 +122,62 @@ PLAN_TOOL = _PLAN_TOOL_BASE   # the default schema (sub-agents off)
 PLANNING_PROMPT = """\
 ## Planning
 
-For a specific request that needs **three or more distinct analyses or charts**
-(e.g. "compare sales by region, show the monthly trend of the top region, then
-break it down by product"), call `update_plan` **first** with 3–{max_steps} concrete
-steps that fit within your action budget, before inspecting data, with the first
-step `in_progress`. If the request is vague ("analyse our sales"), do not plan
+For a specific request that needs {when_to_plan}, call `update_plan` **first**
+with {min_steps}–{max_steps} concrete steps that fit within your action budget,
+before inspecting data, with the first step `in_progress`. If the request is vague ("analyse our sales"), do not plan
 yet: clarify with `ask_user` first and plan once the user has picked a direction.
 
-**You do not need to update step statuses.** Each time a chart is shown, the step
+{status_rule} For {when_not_to_plan}, one number, or a
+small edit to an existing chart, do not plan; just act."""
+
+_STATUS_RULE = {
+    True: """**You do not need to update step statuses.** Each time a chart is shown, the step
 in progress is marked `done` and the next one starts — automatically, without a
 call. If a chart belongs to a different step than the one in progress, pass that
 step's id as `plan_step` in `visualize`. Call `update_plan` again only to change
 the plan itself (add, remove, reorder, or mark a step `skipped`); you may send it
-in the same reply as your next action. For a request answered by one or two
-charts, one number, or a small edit to an existing chart, do not plan; just act."""
+in the same reply as your next action.""",
+    # the behaviour before 2026-10-10, kept for A/B evaluation (ALIDADE_PLAN_AUTO_ADVANCE=0)
+    False: """Then keep it current: mark a step `in_progress` when you start it and `done`
+when its chart or finding is in place (`skipped` if it turned out unnecessary),
+always resending the full list. Update the plan before your final answer so it
+reflects what was done.""",
+}
+
+
+def auto_advance_enabled() -> bool:
+    """Plan statuses advance by code as charts are shown (default: yes).
+    ``ALIDADE_PLAN_AUTO_ADVANCE=0`` restores model-maintained statuses."""
+    return os.environ.get("ALIDADE_PLAN_AUTO_ADVANCE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+# The planning threshold. Without sub-agents a plan only pays off for longer
+# requests (each plan costs an LLM round); with them, two independent analyses
+# are already worth a plan, because the plan is what lets them run in parallel.
+_THRESHOLD = {
+    False: {
+        "when_to_plan": ('**three or more distinct analyses or charts** (e.g. "compare sales by '
+                         'region, show the monthly trend of the top region, then break it down by product")'),
+        "min_steps": "3",
+        "when_not_to_plan": "a request answered by one or two charts",
+    },
+    True: {
+        "when_to_plan": ('**two or more distinct analyses that do not need each other\'s results** '
+                         '(e.g. "which product line has the best margin, and how does churn differ by region"), or '
+                         'three or more analyses in total'),
+        "min_steps": "2",
+        "when_not_to_plan": "a request answered by one chart",
+    },
+}
 
 DEPENDENCY_PROMPT = """
-
-With dependencies, plan as soon as there are **two** independent analyses — the
-plan is what lets them be worked on at the same time.
 **Mark which steps depend on which.** Give every step an `id` (`s1`, `s2`, …),
 list in `depends_on` the ids whose *results* it needs, and write a
-self-contained `goal`. Steps that do not use another step's result (e.g. "renewable
-share by country" and "CO₂ trend by country") get `depends_on: []` — they can be
+self-contained `goal`. Steps that do not use another step's result (e.g. "margin
+by product line" and "churn by region") get `depends_on: []` — they can be
 worked on at the same time. A step that compares, ranks or explains earlier
 results depends on them. Example:
-`s1` share by country (`[]`), `s2` CO₂ change by country (`[]`), `s3` relate the
+`s1` margin by product line (`[]`), `s2` churn by region (`[]`), `s3` relate the
 two (`["s1", "s2"]`). Each `goal` must stand on its own — it is read without this
 conversation — so spell out the table, columns, time range, units and filters
 the user agreed to."""
@@ -150,6 +188,9 @@ def planning_prompt(with_dependencies: bool | None = None) -> str:
     if with_dependencies is None:
         with_dependencies = subagents_enabled()
     text = PLANNING_PROMPT.replace("{max_steps}", str(MAX_PLAN_STEPS))
+    for key, value in _THRESHOLD[bool(with_dependencies)].items():
+        text = text.replace("{" + key + "}", value)
+    text = text.replace("{status_rule}", _STATUS_RULE[auto_advance_enabled()])
     return text + DEPENDENCY_PROMPT if with_dependencies else text
 
 
@@ -264,6 +305,17 @@ def close_plan(steps: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
     if not any(s.get("status") == "in_progress" for s in steps or []):
         return None
     return [{**s, "status": "done"} if s.get("status") == "in_progress" else dict(s) for s in steps]
+
+
+def startable_steps(steps: list[dict[str, Any]], exclude: Any = ()) -> list[dict[str, Any]]:
+    """Unfinished steps whose dependencies are all finished, pending or just
+    marked in progress (a fresh plan usually starts its first step) — what a
+    dispatcher can hand out now. ``exclude``: ids already handed out."""
+    status = {s["id"]: s.get("status") for s in steps}
+    skip = set(exclude or ())
+    return [s for s in steps
+            if s.get("status") in ("pending", "in_progress") and s["id"] not in skip
+            and all(status.get(d) in FINISHED for d in s.get("depends_on") or [])]
 
 
 def ready_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:

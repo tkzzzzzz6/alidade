@@ -22,6 +22,8 @@ vi.mock('react-i18next', () => ({
       };
       if (key === 'chartRec.queue.count') return `${params?.count} queued`;
       if (key === 'dataThread.planProgress') return `${params?.done}/${params?.total}`;
+      if (key === 'dataThread.parallelSteps') return `Steps ${params?.steps} in parallel`;
+      if (key === 'dataThread.stepListSep') return ', ';
       return labels[key] || key;
     },
   }),
@@ -58,6 +60,22 @@ describe('AgentStatusLine', () => {
     expect(line).toHaveTextContent('1/2');
     fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
     expect(onStop).toHaveBeenCalledOnce();
+  });
+
+  it('says which steps run in parallel, only when several do', () => {
+    const { rerender } = render(
+      <AgentStatusLine
+        startedAt={null}
+        agentPlan={[
+          { id: 's1', title: 'a', status: 'done' },
+          { id: 's2', title: 'b', status: 'in_progress' },
+          { id: 's3', title: 'c', status: 'in_progress' },
+        ]}
+      />,
+    );
+    expect(screen.getByTestId('agent-parallel-steps')).toHaveTextContent('Steps 2, 3 in parallel');
+    rerender(<AgentStatusLine startedAt={null} agentPlan={[{ id: 's1', title: 'a', status: 'in_progress' }]} />);
+    expect(screen.queryByTestId('agent-parallel-steps')).toBeNull();
   });
 
   it('falls back to a thinking label', () => {

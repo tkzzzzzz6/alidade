@@ -25,10 +25,14 @@ def test_findings_are_extracted_with_units():
 
 @pytest.mark.parametrize("text", [
     "2022 年最高", "从 2000 到 2020", "2025-07-31 至 2026-01-26", "8-12 月", "7 月到 12 月",
-    "共 3 个国家", "前 5 名", "PG-13 级", "s1 和 s2", "Q3 财报", "CO2 排放", "5G 网络", "v2.1 版本",
+    "共 3 个国家", "90 年代", "前 5 名", "前 15 名门槛", "top 20 movies", "Top20", "PG-13 级", "s1 和 s2", "Q3 财报", "CO2 排放", "5G 网络", "v2.1 版本",
 ])
 def test_years_counts_dates_and_identifiers_are_skipped(text):
     assert claims(text) == []
+
+
+def test_counts_of_people_are_still_checked():
+    assert claims("共 523 名用户") == ["523"]
 
 
 def test_number_near_a_year_with_a_unit_is_still_checked():

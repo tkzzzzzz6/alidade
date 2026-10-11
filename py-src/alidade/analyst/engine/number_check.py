@@ -73,6 +73,9 @@ class Claim:
     sig_digits: int = 0       # significant digits as written ("5080" → 3, "300,519.99" → 8)
 
 
+_RANK_BEFORE = re.compile(r"(?:前|[Tt]op)\s*$")
+
+
 def _normalize(text: str) -> str:
     return (text.replace("−", "-").replace("–", "-").replace("，", ",")
             .replace("．", "."))
@@ -115,8 +118,12 @@ def extract_claims(text: str) -> list[Claim]:
             continue                              # a year (but "1959 TWh" is a quantity)
         if not unit and whole and value <= 31 and _DATE_PART.match(rest):
             continue                              # 12 月, 3 日, 第 2 季度
+        if not unit and whole and re.match(r"\s?年代", rest):
+            continue                              # 90 年代 (a decade)
         if not unit and whole and value <= 10:
             continue                              # counts, list numbers
+        if not unit and whole and (_RANK_BEFORE.search(text[max(0, start - 5):start])):
+            continue                              # a cut-off the writer chose: 前 15 名, top 20
         digits = num.replace(",", "").replace(".", "").lstrip("0")
         sig = len(digits.rstrip("0")) if "." not in num else len(digits)
         claims.append(Claim(

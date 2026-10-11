@@ -157,7 +157,12 @@ def test_prompt_plans_from_three_steps_and_says_statuses_advance(monkeypatch):
     tool = json.dumps(planning.plan_tool())
     assert "advance by themselves" in tool
     monkeypatch.setenv("ALIDADE_SUBAGENTS", "1")
-    assert "**two** independent analyses" in planning.planning_prompt()
+    on = planning.planning_prompt()
+    assert "**two or more distinct analyses that do not need each other's results**" in on
+    # no leftover rule telling the model to skip plans for two charts (it overrode the flag)
+    assert "one or two charts" not in on and "three or more distinct analyses or charts" not in on
+    assert "two or more analyses that do not need" in json.dumps(planning.plan_tool())
+    assert "{" not in on.replace("{max", "")
 
 
 def test_dropped_calls_are_reported(workspace, cp_path):
@@ -169,3 +174,37 @@ def test_dropped_calls_are_reported(workspace, cp_path):
     events = run_agent(client, workspace, cp_path)
     dropped = [e for e in events if e["type"] == "calls_dropped"]
     assert dropped == [{"type": "calls_dropped", "kept": "visualize", "dropped": ["execute_python_script"]}]
+
+
+def test_planning_examples_do_not_reuse_evaluation_questions(monkeypatch):
+    """Prompt examples must not mirror the eval set, or the eval measures memorised hints."""
+    import yaml
+    from pathlib import Path
+    questions = yaml.safe_load((Path(__file__).resolve().parents[3] / "eval" / "questions.yaml").read_text(encoding="utf-8"))
+    monkeypatch.setenv("ALIDADE_SUBAGENTS", "1")
+    text_ = planning.planning_prompt().lower() + json.dumps(planning.plan_tool()).lower()
+    for word in ("renewable", "co₂", "co2", "stock", "volume", "gasoline", "diesel", "unemployment", "box office"):
+        assert word not in text_, word
+    assert len(questions["questions"]) > 40
+
+
+def test_core_skill_answers_partly_missing_data_without_asking():
+    from alidade.analyst.skills import build_registry
+    body = build_registry().load_body("core")
+    assert "*Partly outside the data*" in body and "do not stop to ask" in body
+    assert body.index("*Partly outside the data*") < body.index("*Missing data*")
+    assert "never as the recommended one" in body
+
+
+def test_auto_advance_can_be_switched_off_for_ab_tests(workspace, cp_path, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("ALIDADE_PLAN_AUTO_ADVANCE", "0")
+    prompt = planning.planning_prompt()
+    assert "keep it current: mark a step `in_progress`" in prompt
+    assert "You do not need to update step statuses" not in prompt and "{status_rule}" not in prompt
+    client = FakeClient([
+        call("update_plan", three_steps()),
+        call("visualize", visualize_args()),
+        text("Done."),
+    ])
+    events = run_agent(client, workspace, cp_path)
+    assert plan_events(events) == [["in_progress", "pending", "pending"]]   # untouched by code

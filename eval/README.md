@@ -4,7 +4,7 @@
 
 | 文件 | 作用 |
 |---|---|
-| `questions.yaml` | 50 道题，10 类问题（见下表），用到 5 个自带数据集和 `data/` 里的 3 张表 |
+| `questions.yaml` | 54 道题，11 类问题（见下表），用到 5 个自带数据集和 `data/` 里的 3 张表 |
 | `data/` | 额外的评测数据：脏数据 `messy_sales.csv`、用于多表关联的 `stock_info.csv` 和 `country_continent.csv`；由 `data/make_data.py` 生成（固定随机种子，重跑结果一样） |
 | `run_eval.py` | 运行器：每道题一个子进程、一个全新的工作区，直接调用 Agent（不经过浏览器和 Flask） |
 | `report.py` | 汇总一次运行，或对比两次运行 |
@@ -23,6 +23,7 @@
 | `join` 多表关联 | 2 | 要把两张表关联起来才能回答（股票 + 行业表；能源 + 洲表，且两边列名不同） |
 | `clarify` 必须先澄清 | 3 | 问题本身有歧义或涉及投资建议，**必须在出任何图之前先反问**，出了图再问也算失败 |
 | `multiangle` 多角度分析 | 4 | 一个问题里有 2 个互不依赖的分析角度（如"收益率谁最高"和"成交量谁最大"），每个角度都要答对，且至少 2 张图。用来衡量并行（多工具调用、子 Agent）能省多少时间 |
+| `planned` 三步分析 | 4 | 一个问题里有 3 个要分别出图的分析，至少 3 张图，每个都要答对。用来衡量"计划随出图自动推进"（`ALIDADE_PLAN_AUTO_ADVANCE`）省了多少 LLM 调用和时间 |
 | `grounding` 数字溯源 | 5 | 诱导模型编数字：问数据里没有的年份、缺失值，问一个网上流传着另一个答案的数，或要求心算。结论里**每个数字都必须找得到出处**，并且答案正确 |
 
 ## 一键脚本（推荐）
@@ -73,7 +74,7 @@ Copy-Item eval\.env.example eval\.env      # 然后用编辑器打开 eval\.env�
 | `EVAL_MODEL` / `EVAL_API_BASE` / `EVAL_ENDPOINT` | 模型；`EVAL_API_BASE=` 写空表示不用自定义地址（如 OpenAI 官方） |
 | `EVAL_JOBS` / `EVAL_REPEAT` / `EVAL_TIMEOUT` / `EVAL_NO_JUDGE` | 运行参数，默认 3 / 2 / 600 / 0 |
 
-PowerShell 参数：`-Model`、`-ApiBase`、`-Endpoint`、`-Jobs`、`-Repeat`、`-NoJudge`、`-Only`、`-Timeout`、`-Tag`（结果目录后缀）、`-Run`（report 用）、`-EnvFile`（换一个配置文件）。`eval.sh` 只读环境变量和 `.env`（另有 `EVAL_ONLY`、`EVAL_TAG`、`EVAL_ENV_FILE`）。直接运行 `run_eval.py` 时也会自动读取 `eval/.env`。
+PowerShell 参数：`-Model`、`-ApiBase`、`-Endpoint`、`-Jobs`、`-Repeat`、`-NoJudge`、`-Only`、`-Timeout`、`-Tag`（结果目录后缀）、`-Run`（report 用）、`-EnvFile`（换一个配置文件）、`-UserSim`（模拟用户回答反问，见下文）。`eval.sh` 只读环境变量和 `.env`（另有 `EVAL_ONLY`、`EVAL_TAG`、`EVAL_ENV_FILE`、`EVAL_USER_SIM=1`）。直接运行 `run_eval.py` 时也会自动读取 `eval/.env`。
 
 ## 1. 准备
 
@@ -117,7 +118,7 @@ python eval/run_eval.py --endpoint openai --api-base https://api.deepseek.com --
 - `--judge`：再让同一个模型对照参考答案给每题打 1–5 分（会额外消耗一些 token）。
 - `--only`：只跑部分题，可以写题目 id、类别（`trap`、`cleaning`、`clarify` 等）或数据集（`movies`、`messy_sales` 等），逗号分隔。
 
-一道题大约 3–5 万 token（系统提示词每次调用都要带上），50 道题一轮大约 180–300 万 token。
+一道题大约 3–5 万 token（系统提示词每次调用都要带上），54 道题一轮大约 190–320 万 token。
 
 ## 4. 跑改造前的版本做对比
 
@@ -153,7 +154,9 @@ python eval/report.py eval/results/old-deepseek eval/results/new-deepseek --labe
 | 环境变量 | 作用 |
 |---|---|
 | `ALIDADE_PARALLEL_TOOLS` | 默认 `1`：一次回复里可以同时调多个查看类工具（看表结构、跑查询）。设为 `0` 退回每次回复只调一个 |
-| `ALIDADE_SUBAGENTS` | 默认 `0`。设为 `1` 时，计划的每一步都要标出依赖（`depends_on`）和独立的任务说明（`goal`）。目前只影响计划，子 Agent 的调度见 `docs/plans/parallel-subagents.md` |
+| `ALIDADE_SUBAGENTS` | 默认 `0`。设为 `1` 时，计划的每一步要标出依赖（`depends_on`）和独立的任务说明（`goal`），互相独立的步骤交给子 Agent 并行完成（见 `docs/plans/parallel-subagents.md`） |
+| `ALIDADE_MAX_SUBAGENTS` / `ALIDADE_SUBAGENT_TIMEOUT` | 同时运行的子 Agent 数（默认 3）/ 单个子 Agent 的超时秒数（默认 180） |
+| `ALIDADE_PLAN_AUTO_ADVANCE` | 默认 `1`：画出一张图，计划里对应的步骤自动标为完成、下一步标为进行中，模型不用再调 `update_plan` 改状态。设为 `0` 退回旧行为（提示词也换回"自己更新状态"），只用于对比评测 |
 
 开关在 PowerShell 里这样设置（只对当前终端有效），再用 `report.py` 直接对比两个结果目录：
 
@@ -165,6 +168,16 @@ python eval/report.py eval/results/new-serial eval/results/new-parallel --labels
 
 # 计划里能不能识别出可以同时做的步骤
 $env:ALIDADE_SUBAGENTS = '1'; .\eval\eval.ps1 new -Only multiangle -Tag plan-deps; Remove-Item Env:ALIDADE_SUBAGENTS
+
+# 子 Agent 关 vs 开（-Jobs 1：一次只跑一道题，耗时才可比）
+.\eval\eval.ps1 new -Only multiangle,multistep -Jobs 1 -Tag sub-off
+$env:ALIDADE_SUBAGENTS = '1'; .\eval\eval.ps1 new -Only multiangle,multistep -Jobs 1 -Tag sub-on; Remove-Item Env:ALIDADE_SUBAGENTS
+python eval/report.py eval/results/new-sub-off eval/results/new-sub-on --labels 单Agent 子Agent --out eval/results/compare-subagents.md
+
+# 计划自动推进：关 vs 开（三步分析题）
+$env:ALIDADE_PLAN_AUTO_ADVANCE = '0'; .\eval\eval.ps1 new -Only planned -Jobs 1 -Tag advance-off; Remove-Item Env:ALIDADE_PLAN_AUTO_ADVANCE
+.\eval\eval.ps1 new -Only planned -Jobs 1 -Tag advance-on
+python eval/report.py eval/results/new-advance-off eval/results/new-advance-on --labels 手动更新 自动推进 --out eval/results/compare-advance.md
 ```
 
 | 指标 | 计算方式 |
@@ -174,7 +187,7 @@ $env:ALIDADE_SUBAGENTS = '1'; .\eval\eval.ps1 new -Only multiangle -Tag plan-dep
 | 平均 update_plan 调用次数 | 计划状态现在由代码随出图自动推进，这个数应该接近"每题最多 1 次"（列计划那一次） |
 | 和动作一起被丢弃的工具调用 | 模型把查看类调用和画图放在同一次回复里、被丢掉的次数；计划更新不再被丢弃 |
 | 多角度题：计划里有可并行步骤的比例 | 计划中最多有几步可以同时开始（依赖都已完成）；≥2 记为"可并行"。只有开了 `ALIDADE_SUBAGENTS` 才可能大于 0 |
-| 使用子 Agent 的题目比例 / 子 Agent 总数 / 失败率 | 子 Agent 调度上线后才有数据，现在都是 0 或"—" |
+| 使用子 Agent 的题目比例 / 子 Agent 总数 / 失败率 | 开了 `ALIDADE_SUBAGENTS` 才有数据；失败包括出错和超时 |
 
 ## 数字溯源（结论里的数字是不是算出来的）
 
@@ -237,11 +250,29 @@ python eval/report.py eval/results/new-grounding --recheck-numbers
 
 Agent 反问时，运行器会自动选第一个（推荐的）选项来回答，每题最多回答 2 次（`--max-answers`）。
 
+## 模拟用户（`--user-sim` / `-UserSim`）
+
+"总选推荐选项"测不出一件事：用户心里想的其实是另一个口径时，先反问到底有没有用。为此 8 道模糊/需澄清题带了一个隐藏的 `intent`（用户真正想问什么，以及对应的标准答案），例如"最成功的电影"其实是想看**回报率**（预算 ≥ 5000 万），答案是 Jurassic Park。
+
+打开 `--user-sim` 后：
+
+- Agent 反问时，由同一个模型扮演用户，只看到 `intent.text` 和 Agent 的问题与选项，按真实意图作答（选最接近的选项，必要时补一句说明）。这次调用**不计入** token 统计；调用失败时退回选第一个选项；
+- 判分时额外检查结论是否答到 `intent` 的答案（`intent.mentions_any`）；这些题的"任务成功"改为"正常结束且答到了用户真正想问的"；
+- 报告新增三行："模拟用户：按用户真实意图答对的比例"，以及按"反问过 / 没反问"拆开的两行。没反问就只能靠猜，命中意图的概率应该明显更低——两行的差就是"先问清楚"的价值。
+
+```powershell
+.\eval\eval.ps1 new -Only ambiguous,clarify -UserSim -Tag usersim
+.\eval\eval.ps1 old -Only ambiguous,clarify -UserSim -Tag usersim
+python eval/report.py eval/results/old-usersim eval/results/new-usersim --labels 改造前 改造后 --out eval/results/compare-usersim.md
+```
+
+注意：模拟用户和被测 Agent 用的是同一个模型，结果有一定"自己配合自己"的偏差；`intent` 的口径是出题时定的，不代表唯一合理的理解。
+
 ## 解读时注意
 
 - **图表规则是改造后才加的**：所以"最终展示图表的错误率"天然对新版本有利。写结论时要说明：这是"用同一套规则检查两个版本的输出"，并附上几张实际的图作为例子。
 - **结论正确率只是关键词匹配**：可能漏判（比如答案写成了别的说法）。可以结合 `--judge` 的分数和 `logs/` 里的原文一起看。
-- **样本量不大**：50 道题、每题 2–3 次，差距在几个百分点以内的指标不要下结论。
+- **样本量不大**：54 道题、每题 2–3 次，差距在几个百分点以内的指标不要下结论。
 
 ## 图表检查规则（折线图线数）
 

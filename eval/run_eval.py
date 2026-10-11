@@ -421,6 +421,45 @@ def answer_for(interact: dict[str, Any]) -> tuple[str, list[bool]]:
     return "; ".join(f"{i + 1}. {a}" for i, a in enumerate(answers)), has_options
 
 
+USER_SIM_PROMPT = """你在扮演一个使用数据分析助手的用户。你心里真正想知道的是：
+
+{intent}
+
+助手在分析前问了你下面的问题。请像真实用户一样用一两句中文回答：
+- 如果某个选项正好符合你的想法，就选它（可以直接说选项内容）；
+- 如果没有合适的选项，就直接说出你想要的（可以说得具体一些，比如口径、时间段、筛选条件）；
+- 只回答被问到的内容，不要替助手做分析，也不要给出答案或数字。
+
+助手的说明：{context}
+
+助手的问题：
+{questions}
+
+只输出你的回答。"""
+
+
+def simulate_user(client: Any, intent: str, interact: dict[str, Any]) -> str:
+    """Answer the agent's questions as a user with a hidden goal (same model).
+
+    Not counted in the run's tokens: it stands in for a person.
+    """
+    lines = []
+    for i, q in enumerate(interact.get("questions") or [], 1):
+        opts = [o.get("label") if isinstance(o, dict) else o for o in q.get("options") or []]
+        lines.append(f"{i}. {q.get('text', '')}" + (f"（选项：{' / '.join(str(o) for o in opts if o)}）" if opts else ""))
+    prompt = USER_SIM_PROMPT.format(intent=intent, context=str(interact.get("context") or "（无）")[:800],
+                                    questions="\n".join(lines) or "（无）")
+    METER.enabled = False
+    try:
+        resp = client.get_completion([{"role": "user", "content": prompt}], stream=False)
+        reply = (resp.choices[0].message.content or "").strip()
+        return reply[:400] or FALLBACK_ANSWER
+    except Exception:  # noqa: BLE001 — fall back to the recommended option
+        return answer_for(interact)[0]
+    finally:
+        METER.enabled = True
+
+
 def _normalize(text: str) -> str:
     # "2 月" == "2月", "Warner  Bros" == "WarnerBros": spacing is not part of the answer
     return "".join(text.lower().split())
@@ -478,15 +517,24 @@ def grade(q: dict[str, Any], rec: dict[str, Any]) -> dict[str, Any]:
     if q.get("expect_ask"):
         # must ask before drawing anything — the point is not to guess
         clarified = bool(rec.get("asked")) and rec.get("charts_before_ask", 0) == 0
+    intent_ok = None
+    if rec.get("user_sim") and q.get("intent"):
+        # the user had a goal of their own: the answer must meet that goal
+        intent_ok = answer_ok(q["intent"], text)
     grounded = None
     limit = q.get("max_unsupported")
     unsupported = (rec.get("number_check") or {}).get("unsupported")
     if limit is not None and isinstance(unsupported, int):
         # every number in the answer must come from the run (or the data)
         grounded = unsupported <= int(limit)
-    success = (bool(rec.get("completed")) and bool(rec.get("chart_ok", True))
-               and answer is not False and clarified is not False and grounded is not False)
-    return {"mentions_ok": answer, "clarified_first": clarified, "grounded": grounded, "success": success}
+    if intent_ok is not None:
+        # what counts is meeting the user's goal, whether or not the agent asked
+        success = bool(rec.get("completed")) and intent_ok is True
+    else:
+        success = (bool(rec.get("completed")) and bool(rec.get("chart_ok", True))
+                   and answer is not False and clarified is not False and grounded is not False)
+    return {"mentions_ok": answer, "clarified_first": clarified, "grounded": grounded,
+            "intent_ok": intent_ok, "success": success}
 
 
 def make_agent(pkg: str, client: Any, workspace: Any, args: argparse.Namespace):
@@ -541,6 +589,8 @@ def run_question(q: dict[str, Any], datasets: list[dict[str, Any]], args: argpar
             if not last or last.get("type") != "interact" or len(asks) >= args.max_answers:
                 break
             answer, has_options = answer_for(last)
+            if args.user_sim and q.get("intent"):
+                answer = simulate_user(client, q["intent"]["text"], last)
             asks.append({"questions": [x.get("text") for x in last.get("questions") or []],
                          "has_options": has_options, "context": bool(last.get("context")),
                          "answer": answer})
@@ -619,8 +669,9 @@ def score(q, events, asks, usage, duration, error, client, args) -> dict[str, An
     first_ask = next((i for i, e in enumerate(events) if e.get("type") == "interact"), None)
     charts_before_ask = sum(1 for e in (events if first_ask is None else events[:first_ask])
                             if e.get("type") == "result" and e.get("status") == "success")
+    user_sim = bool(getattr(args, "user_sim", False) and q.get("intent"))
     graded = grade(q, {"summary": summary, "charts": charts, "completed": completed, "chart_ok": chart_ok,
-                       "asked": len(asks), "charts_before_ask": charts_before_ask})
+                       "asked": len(asks), "charts_before_ask": charts_before_ask, "user_sim": user_sim})
     mention, success = graded["mentions_ok"], graded["success"]
 
     record = {
@@ -644,6 +695,7 @@ def score(q, events, asks, usage, duration, error, client, args) -> dict[str, An
         "asks": asks, "asked": len(asks),
         "charts_before_ask": charts_before_ask if asks else None,
         "expect_ask": bool(q.get("expect_ask")), "clarified_first": graded["clarified_first"],
+        "user_sim": user_sim, "intent_ok": graded["intent_ok"],
         "subagents": subagents,
         "compressions": [{k: c.get(k) for k in ("tokens_before", "tokens_after", "budget", "mode")} for c in compress],
         "summary": summary[:2000],
@@ -738,6 +790,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-answers", type=int, default=2, help="auto-answers to ask_user per question")
     p.add_argument("--language", default="zh")
     p.add_argument("--judge", action="store_true", help="also score each answer 1-5 with the same model")
+    p.add_argument("--user-sim", action="store_true",
+                   help="questions with an `intent`: an LLM plays the user (answers ask_user from the hidden "
+                        "goal) and the answer is graded against that goal")
     p.add_argument("--out", default="")
     p.add_argument("--worker", default="", help=argparse.SUPPRESS)
     p.add_argument("--worker-out", default="", help=argparse.SUPPRESS)
@@ -772,6 +827,8 @@ def _worker_cmd(args: argparse.Namespace, qid: str, out_file: Path) -> list[str]
             cmd += [f"--{name.replace('_', '-')}", str(value)]
     if args.judge:
         cmd.append("--judge")
+    if getattr(args, "user_sim", False):
+        cmd.append("--user-sim")
     return cmd
 
 

@@ -516,7 +516,13 @@
     "chartCheckRetrying": "图表自检发现问题，正在修正：{{detail}}",
     "chartCheckFixed": "图表自检：已自动修正",
     "chartCheckWarning": "图表自检提示：{{detail}}",
-    "contextCompressed": "已压缩较早的步骤，保持上下文精简"
+    "contextCompressed": "已压缩较早的步骤，保持上下文精简",
+    "stepTag": "第 {{n}} 步",
+    "stepListSep": "、",
+    "parallelSteps": "第 {{steps}} 步同时进行中",
+    "subagentStarted": "{{step}}交给子 Agent：{{title}}",
+    "subagentDone": "{{step}}完成（{{charts}} 张图）",
+    "subagentFailed": "{{step}}未完成（{{status}}）"
   },
   "dataGrid": {
     "loading": "加载中...",

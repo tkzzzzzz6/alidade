@@ -84,8 +84,8 @@ Some requests cannot be answered well until you know what the user is after:
 - **Open-ended** — "analyse X", "what's interesting in this data", "look into Y"
   with no metric, comparison or question named;
 - **Ambiguous on a choice that changes the answer** — an undefined criterion
-  ("most successful", "performance"), period ("last year" when the data does not
-  line up with calendar years) or scope;
+  ("the best customers", "how healthy the business is"), period ("recently" when
+  several time windows would fit) or scope;
 - **Asking for advice** — what to buy, sell or invest in, or other personal
   financial, medical or legal recommendations.
 
@@ -95,7 +95,7 @@ offer 2–3 concrete directions built from the actual columns, the one you
 recommend first. Do not draw several speculative charts to cover every
 possibility — one well-aimed analysis after the user picks is cheaper and
 better. For advice requests, do not recommend what to buy or sell; offer
-analytical angles instead (e.g. return, volatility, trading volume).
+analytical angles instead (e.g. growth, risk, cost).
 
 When the request already names a metric, comparison or chart, just answer it —
 do not ask for confirmation.

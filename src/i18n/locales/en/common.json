@@ -516,7 +516,13 @@
     "chartCheckRetrying": "Chart self-check found a problem, fixing it: {{detail}}",
     "chartCheckFixed": "Chart self-check: fixed automatically",
     "chartCheckWarning": "Chart self-check: {{detail}}",
-    "contextCompressed": "Condensed earlier steps to keep the context focused"
+    "contextCompressed": "Condensed earlier steps to keep the context focused",
+    "stepTag": "Step {{n}}",
+    "stepListSep": ", ",
+    "parallelSteps": "Steps {{steps}} running in parallel",
+    "subagentStarted": "{{step}} handed to a sub-agent: {{title}}",
+    "subagentDone": "{{step}} finished ({{charts}} charts)",
+    "subagentFailed": "{{step}} did not finish ({{status}})"
   },
   "dataLoading": {
     "extractingData": "extracting data...",

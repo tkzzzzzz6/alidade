@@ -108,12 +108,14 @@ class AnalystGraph:
         g.add_node("tools", self.tools_step)
         g.add_node("act", self.act_step)
         g.add_node("await_user", self.await_user)
+        g.add_node("subagents", self.subagents_step)
         g.add_node("finish", self.finish)
 
         g.add_edge(START, "prepare")
         g.add_edge("prepare", "agent")
         g.add_conditional_edges("agent", _route, ["tools", "act", "agent", "finish"])
-        g.add_edge("tools", "agent")
+        g.add_conditional_edges("tools", _route_after_tools, ["agent", "subagents"])
+        g.add_conditional_edges("subagents", _route_after_tools, ["agent", "subagents"])
         g.add_conditional_edges("act", _route, ["agent", "await_user", "finish"])
         g.add_edge("await_user", "agent")
         g.add_edge("finish", END)
@@ -165,6 +167,9 @@ class AnalystGraph:
             "chart_retries": {},
             "plan": [],
             "compressed_upto": 0,
+            "after_tools": "agent",
+            "dispatched_steps": [],
+            "subagent_rounds": 0,
         }
 
     def agent_step(self, state: AnalystState) -> dict[str, Any]:
@@ -173,6 +178,11 @@ class AnalystGraph:
         rlog = agent._reasoning_log
         cycles = state.get("cycles", 0)
         max_iterations = state.get("max_iterations", agent.max_iterations)
+
+        should_stop = getattr(agent, "should_stop", None)
+        if should_stop is not None and should_stop():
+            # a sub-agent past its time limit (or the run was stopped)
+            return {"route": "finish", "status": "stopped", "final_text": ""}
 
         if cycles >= hard_ceiling(max_iterations):
             return {"route": "finish", "status": "max_iterations",
@@ -351,6 +361,7 @@ class AnalystGraph:
         loaded = list(state.get("loaded_skills") or [CORE_SKILL])
         input_tables = state.get("input_tables") or []
         plan = list(state.get("plan") or [])
+        plan_changed = False
         agent._begin_payload(state)
 
         skill_tool_owners = agent._loaded_skill_tool_map(set(loaded))
@@ -387,8 +398,9 @@ class AnalystGraph:
                        "stdout": result.get("stdout", ""), "error": result.get("error")})
             elif tool_name == "update_plan":
                 plan = planning.normalize_steps(tool_args.get("steps"))
+                plan_changed = True
                 tool_content = planning.summarize_plan(plan)
-                write({"type": "plan", "steps": plan})
+                write({"type": "plan", "steps": [dict(x) for x in plan]})
                 write({"type": "tool_result", "tool": tool_name, "status": "ok", "stdout": tool_content})
             elif tool_name == "inspect_source_data":
                 tool_content = handle_inspect_source_data(
@@ -446,8 +458,141 @@ class AnalystGraph:
             messages.append({"role": "user", "content": blocks})
         messages.extend(pending_skill_bodies)
 
+        after = "agent"
+        if plan_changed and self._can_fan_out(state, plan):
+            after = "subagents"
         return {"messages": messages, "loaded_skills": loaded, "pending_tool_calls": [],
-                "charts": agent._end_payload(), "plan": plan}
+                "charts": agent._end_payload(), "plan": plan, "after_tools": after}
+
+    # ── parallel sub-agents ───────────────────────────────────────────
+
+    MAX_SUBAGENT_ROUNDS = 3
+
+    def _can_fan_out(self, state: AnalystState, plan: list[dict[str, Any]]) -> bool:
+        """Sub-agents are on, and the plan has ≥2 steps that could start now."""
+        if getattr(self.agent, "should_stop", None) is not None:
+            return False                                   # a sub-agent never fans out again
+        if not planning.subagents_enabled():
+            return False
+        if int(state.get("subagent_rounds") or 0) >= self.MAX_SUBAGENT_ROUNDS:
+            return False
+        return len(planning.startable_steps(plan, state.get("dispatched_steps") or [])) >= 2
+
+    def subagents_step(self, state: AnalystState) -> dict[str, Any]:
+        """Hand every step that can start now to its own sub-agent, run them in
+        parallel (bounded), stream their events tagged with ``step_id``, and
+        report what each found back to the main agent."""
+        import queue
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        from alidade.analyst.engine import subagent
+
+        agent = self.agent
+        write = _writer()
+        dispatched = list(state.get("dispatched_steps") or [])
+        plan = [dict(s) for s in state.get("plan") or []]
+        batch = planning.startable_steps(plan, dispatched)
+        for s in plan:
+            if s["id"] in {b["id"] for b in batch}:
+                s["status"] = "in_progress"
+        write({"type": "plan", "steps": [dict(x) for x in plan]})
+
+        messages = _copy_messages(state.get("messages") or [])
+        tasks = [{
+            "step_id": b["id"], "title": b["title"], "goal": b.get("goal") or b["title"],
+            "user_question": state.get("user_question", ""),
+            "user_answers": _user_answers(messages),
+            "input_tables": state.get("input_tables") or [],
+            "parent_run_id": state.get("run_id", ""),
+        } for b in batch]
+        events: queue.Queue = queue.Queue()
+        limit = subagent.timeout_s()
+
+        stops: list[threading.Event] = []
+        run_ended = getattr(agent, "run_ended", None)          # the user pressed Stop / went away
+
+        def run_one(task: dict[str, Any]) -> dict[str, Any]:
+            stop = threading.Event()
+            stops.append(stop)
+            if run_ended is not None and run_ended.is_set():
+                stop.set()
+            timer = threading.Timer(limit, stop.set)
+            timer.daemon = True
+            events.put({"type": "subagent", "step_id": task["step_id"], "status": "started",
+                        "title": task["title"]})
+            timer.start()
+            try:
+                result = subagent.run_subtask(agent, task, events.put, stop)
+            finally:
+                timer.cancel()
+            if stop.is_set() and result["status"] == "stopped":
+                result["status"] = "timeout"
+            return result
+
+        results: dict[str, dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=subagent.max_parallel(), thread_name_prefix="subagent") as pool:
+            futures = {pool.submit(run_one, t): t["step_id"] for t in tasks}
+            pending = set(futures)
+            while pending:
+                try:
+                    write(events.get(timeout=0.2))          # forward from this node's thread only
+                except queue.Empty:
+                    pass
+                if run_ended is not None and run_ended.is_set():
+                    for s in stops:
+                        s.set()
+                for f in [f for f in pending if f.done()]:
+                    pending.discard(f)
+                    sid = futures[f]
+                    try:
+                        results[sid] = f.result()
+                    except Exception as exc:  # noqa: BLE001
+                        results[sid] = {"step_id": sid, "status": "failed", "error": str(exc)[:300],
+                                        "findings": "", "charts": [], "chart_titles": [],
+                                        "completed_steps": [], "duration_s": 0.0}
+        while not events.empty():
+            write(events.get_nowait())
+
+        charts = list(state.get("charts") or [])
+        completed_steps = list(state.get("completed_steps") or [])
+        sections = []
+        for t in tasks:
+            r = results[t["step_id"]]
+            write({"type": "subagent", "step_id": t["step_id"], "status": r["status"],
+                   "duration_s": r.get("duration_s"), "charts": len(r.get("chart_titles") or [])})
+            ok = r["status"] in ("success", "budget_exhausted") and r.get("chart_titles")
+            for s in plan:
+                if s["id"] == t["step_id"]:
+                    s["status"] = "done" if ok or r["status"] == "success" else "pending"
+            charts.extend(r.get("charts") or [])
+            completed_steps.extend(r.get("completed_steps") or [])
+            shown = "; ".join(x for x in r.get("chart_titles") or [] if x) or "none"
+            body = r.get("findings") or "(no findings)"
+            if r["status"] not in ("success", "budget_exhausted"):
+                body += f"\n(This step did not finish: {r['status']}{' — ' + r['error'] if r.get('error') else ''}.)"
+            sections.append(f"### {t['step_id']} — {t['title']} [{r['status']}]\nCharts shown: {shown}\n{body}")
+        write({"type": "plan", "steps": [dict(x) for x in plan]})
+
+        dispatched += [t["step_id"] for t in tasks]
+        messages.append({"role": "user", "content": (
+            "[SUBTASK RESULTS] These plan steps were done in parallel by other analysts; their "
+            "charts are already shown to the user — do not draw them again.\n\n"
+            + "\n\n".join(sections)
+            + "\n\nNow do any remaining steps yourself (redo a step that did not finish only if "
+            "the answer needs it), then write the final answer combining all findings. Check "
+            "that the steps used the same time range, units and filters; if they did not, say "
+            "so instead of comparing the numbers directly.\n\n"
+            + planning.summarize_plan(plan)
+        )})
+        update: dict[str, Any] = {
+            "messages": messages, "plan": plan, "charts": charts, "completed_steps": completed_steps,
+            "dispatched_steps": dispatched, "subagent_rounds": int(state.get("subagent_rounds") or 0) + 1,
+            "tool_rounds": 0,
+        }
+        nxt = {**state, **update}
+        update["after_tools"] = "subagents" if self._can_fan_out(nxt, plan) else "agent"
+        return update
 
     def act_step(self, state: AnalystState) -> dict[str, Any]:
         agent = self.agent
@@ -492,7 +637,7 @@ class AnalystGraph:
         )
         if observation is not None and agent._chart_check_note:
             observation = f"{observation}\n\n{agent._chart_check_note}"
-        if name == "visualize" and len(completed_steps) > charts_before:
+        if name == "visualize" and len(completed_steps) > charts_before and planning.auto_advance_enabled():
             # a chart was shown: advance the plan here instead of spending an
             # LLM round on an update_plan call
             advanced = planning.advance_plan(state.get("plan") or [], (pending.get("args") or {}).get("plan_step"))
@@ -545,7 +690,8 @@ class AnalystGraph:
                 message_code="agent.llmApiError",
             ))
             return {}
-        closed = planning.close_plan(state.get("plan") or []) if status == "success" else None
+        closed = (planning.close_plan(state.get("plan") or [])
+                  if status == "success" and planning.auto_advance_enabled() else None)
         if closed is not None:
             write({"type": "plan", "steps": closed})
         content: dict[str, Any] = {
@@ -562,6 +708,23 @@ class AnalystGraph:
             "content": content,
         })
         return {"plan": closed} if closed is not None else {}
+
+
+def _route_after_tools(state: AnalystState) -> str:
+    return state.get("after_tools") or "agent"
+
+
+def _user_answers(messages: list[dict[str, Any]], limit: int = 3) -> list[str]:
+    """What the user said after the opening message (answers to ask_user)."""
+    answers = []
+    for m in messages[2:]:
+        content = m.get("content")
+        if m.get("role") != "user" or not isinstance(content, str):
+            continue
+        if content.startswith("[") or not content.strip():
+            continue                                        # system notes, skill bodies, results
+        answers.append(content.strip()[:300])
+    return answers[-limit:]
 
 
 def _route(state: AnalystState) -> str:

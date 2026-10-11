@@ -4,7 +4,7 @@
 # fresh workspace. Fields:
 #   id         unique id
 #   dataset    key in `datasets` below
-#   category   lookup | trend | multistep | trap | ambiguous | cleaning | join | clarify | multiangle | grounding
+#   category   lookup | trend | multistep | trap | ambiguous | cleaning | join | clarify | multiangle | grounding | planned
 #                lookup    — one factual answer, checked by `mentions_any`
 #                trend     — a chart is the answer
 #                multistep — derive a metric, then chart it
@@ -20,6 +20,9 @@
 #                multiangle — 2–3 independent analyses in one request; the
 #                            target of parallel sub-agents (each angle checked
 #                            by a `mentions_all` group, ≥2 charts required)
+#                planned   — three separate analyses in one request: long enough
+#                            that the agent writes a plan (≥3 steps); measures
+#                            what keeping the plan up to date costs
 #                grounding — invites a made-up number (data that is not
 #                            there, a figure the model "knows" from memory, or
 #                            arithmetic done in its head); every number in the
@@ -34,6 +37,11 @@
 #   answer_number {value, tolerance}: some number in the answer is within
 #                 `tolerance` (relative) of `value`
 #   expect_ask    true: must call ask_user before showing any chart
+#   intent     what the user really wants (a hidden goal) and how to check the
+#              answer against it: `text`, plus mentions_any / answer_number,
+#              and `note`. With `run_eval.py --user-sim` an LLM plays the user
+#              and answers the agent's questions from `text`; the answer is
+#              graded against this check instead of the default one.
 #   max_unsupported  at most this many numbers in the answer may lack a source
 #                 in the run's output, the chart data or the input tables
 #                 (checked by py-src/alidade/analyst/engine/number_check.py)
@@ -110,6 +118,10 @@ questions:
   - id: gas-ambiguous
     dataset: gas
     category: ambiguous
+    intent:
+      text: "我只关心柴油和普通汽油的比较：按年均价，柴油（不分等级）最后一次比普通汽油（regular）便宜是哪一年？"
+      mentions_any: ["2004"]
+      note: "柴油比普通汽油便宜的年份是 1995、1997、1999、2001–2004，最后一次是 2004 年。"
     question: 帮我分析一下油价。
     chart: true
     note: 问题很宽泛；理想做法是给出几个带推荐的方向（如长期趋势 / 等级对比 / 汽柴油对比）。
@@ -151,6 +163,10 @@ questions:
   - id: energy-ambiguous
     dataset: energy
     category: ambiguous
+    intent:
+      text: "我关心核电：2000 年到 2020 年，哪个国家的核电发电量下降得最多？"
+      mentions_any: ["Japan", "日本"]
+      note: "Japan 下降约 264 TWh 最多，其次 Germany 约 105 TWh、France 约 61 TWh。"
     question: 这份能源数据有什么值得关注的？
     chart: true
     note: 宽泛问题；可以先问用户关注方向，或给出几个有依据的发现。
@@ -204,6 +220,10 @@ questions:
   - id: movies-ambiguous
     dataset: movies
     category: ambiguous
+    intent:
+      text: "我想知道哪家发行商（Distributor）的电影口碑最好：只算至少 20 部电影的发行商，看平均 IMDB 评分。"
+      mentions_any: ["Focus Features"]
+      note: "Focus Features 约 7.14 最高（32 部），其次 Sony Pictures Classics 约 6.96、Fox Searchlight 约 6.64。"
     question: 分析一下电影数据。
     chart: true
     note: 宽泛问题；理想做法是给出带推荐的分析方向。
@@ -246,6 +266,10 @@ questions:
   - id: stocks-ambiguous
     dataset: stocks
     category: ambiguous
+    intent:
+      text: "我比较保守，想找最稳的股票：日收益率波动最小的是哪只？"
+      mentions_any: ["MSFT", "微软", "Microsoft"]
+      note: "MSFT 日收益率标准差约 1.18% 最小，AAPL 约 1.42% 次之；用日内振幅衡量也是 MSFT 最小。"
     question: 我该关注哪只股票？
     chart: false
     note: 不应给投资建议；理想做法是问清关注维度（涨幅 / 波动 / 成交量）并给出带推荐的选项。
@@ -288,6 +312,10 @@ questions:
   - id: unemp-ambiguous
     dataset: unemployment
     category: ambiguous
+    intent:
+      text: "我说的\"影响大\"是失业人数涨得多：2007 年到 2009 年，年均失业人数（count）增长百分比最大的行业。"
+      mentions_any: ["Mining", "采矿", "采掘"]
+      note: "Mining and Extraction 失业人数增长约 256% 最多，其次 Manufacturing 约 168%、Agriculture 约 155%。"
     question: 看看哪些行业受经济危机影响大。
     chart: true
     note: 需要明确危机时间段（2008–2009）和"影响"的衡量方式；Construction、Mining、Agriculture 受影响最大。
@@ -361,6 +389,10 @@ questions:
   - id: clarify-stocks-period
     dataset: stocks
     category: clarify
+    intent:
+      text: "\"去年\"指数据里 2025 年的那一段（7 月底到 12 月底），我想知道这段时间跌得最多的是哪只股票。"
+      mentions_any: ["META", "Meta"]
+      note: "2025 年那段 META 约 −14.5% 跌得最多，MSFT 约 −9.0% 次之。"
     question: 比较一下这些股票去年和今年的表现。
     chart: false
     expect_ask: true
@@ -370,6 +402,10 @@ questions:
   - id: clarify-movie-success
     dataset: movies
     category: clarify
+    intent:
+      text: "我说的\"成功\"是投资回报率，也就是全球票房除以制作预算，而且只看制作预算至少 5000 万美元的电影。"
+      mentions_any: ["Jurassic Park", "侏罗纪公园"]
+      note: "Jurassic Park 约 14.65 倍最高，其次 The Twilight Saga: New Moon 约 14.05 倍、Shrek 2 约 13.14 倍。"
     question: 哪部电影最成功？
     chart: false
     expect_ask: true
@@ -377,6 +413,10 @@ questions:
   - id: clarify-best-industry
     dataset: unemployment
     category: clarify
+    intent:
+      text: "\"最好\"指金融危机期间最抗跌：2007 年到 2009 年，年均失业率上升最少的行业。"
+      mentions_any: ["Government", "政府"]
+      note: "Government 只上升约 1.28 个百分点，Education and Health 约 2.30、Self-employed 约 2.65。"
     question: 哪个行业最好？
     chart: false
     expect_ask: true
@@ -475,3 +515,52 @@ questions:
     max_unsupported: 0
     answer_number: {value: 12.37, tolerance: 0.01}
     note: 2006 年平均约 6.68%，2009 年约 19.05%，高约 12.37 个百分点。
+
+  # ── Planned: three analyses in one request (the agent should plan) ──────
+  - id: planned-gas
+    dataset: gas
+    category: planned
+    question: >-
+      请分三步分析：① 普通汽油（gasoline、grade=regular、formulation=all）年均价最高是哪一年；
+      ② 按年均价算，柴油（diesel、grade=all）最后一次比普通汽油便宜是哪一年；
+      ③ premium 与 regular 汽油（formulation=all）的年均价差最大是哪一年、差多少美元。每一步各画一张图。
+    chart: true
+    min_charts: 3
+    mentions_all: [["2022"], ["2004"]]
+    answer_number: {value: 0.926, tolerance: 0.02}
+    note: >-
+      ① 2022 年（约 3.95 美元）；② 2004 年（1995、1997、1999、2001–2004 年柴油更便宜）；
+      ③ 2025 年价差最大，约 0.926 美元（2024 年约 0.891）。
+  - id: planned-movies
+    dataset: movies
+    category: planned
+    question: >-
+      请分三步分析：① 哪种类型（Major Genre）电影的平均全球票房最高；
+      ② 至少 100 部电影的 MPAA 分级里，哪个分级的平均 IMDB 评分最高、是多少；
+      ③ 2000 到 2009 年间哪一年上映的电影最多。每一步各画一张图。
+    chart: true
+    min_charts: 3
+    mentions_all: [["Adventure", "冒险"], ["2006"]]
+    answer_number: {value: 6.43, tolerance: 0.006}
+    note: ① Adventure 约 2.41 亿；② R 级约 6.43（PG-13 约 6.05、PG 约 5.93）；③ 2006 年 220 部最多。
+  - id: planned-stocks
+    dataset: stocks
+    category: planned
+    question: >-
+      请分三步分析这 6 只股票：① 整个区间（首尾收盘价）收益率最高的是哪只；② 日均成交量最大的是哪只；
+      ③ 日收益率波动（日收益率的标准差）最小的是哪只。每一步各画一张图。
+    chart: true
+    min_charts: 3
+    mentions_all: [["GOOGL", "谷歌", "Alphabet"], ["NVDA", "英伟达"], ["MSFT", "微软", "Microsoft"]]
+    note: ① GOOGL 约 +73.9%；② NVDA 日均约 1.8 亿股；③ MSFT 日收益率标准差约 1.18% 最小，AAPL 约 1.42% 次之。
+  - id: planned-unemployment
+    dataset: unemployment
+    category: planned
+    question: >-
+      请分三步分析：① 2000–2010 年平均失业率最低的行业；② 平均失业率最高的行业；
+      ③ 建筑业（Construction）2009 年的平均失业率比 2006 年高多少个百分点。每一步各画一张图。
+    chart: true
+    min_charts: 3
+    mentions_all: [["Government", "政府"], ["Agriculture", "农业"]]
+    answer_number: {value: 12.37, tolerance: 0.01}
+    note: ① Government 约 2.58%；② Agriculture 约 9.84%（Construction 约 9.43% 次之）；③ 2006 年约 6.68%、2009 年约 19.05%，高约 12.37 个百分点。

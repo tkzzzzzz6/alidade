@@ -31,9 +31,10 @@ CATEGORY_NAMES = {
     "join": "多表关联",
     "multiangle": "多角度分析",
     "grounding": "数字溯源",
+    "planned": "三步分析",
 }
 VAGUE = {"ambiguous", "clarify"}
-MULTI = {"multistep", "multiangle"}   # where parallel sub-agents should pay off
+MULTI = {"multistep", "multiangle", "planned"}   # where parallel sub-agents should pay off
 
 
 def load_runs(path: str | Path, rescore: bool = True, recheck_numbers: bool = False) -> list[dict[str, Any]]:
@@ -111,6 +112,7 @@ def metrics(runs: list[dict[str, Any]]) -> dict[str, Any]:
     multiangle = [r for r in ran if r.get("category") == "multiangle"]
     subagents = [s for r in ran for s in r.get("subagents") or []]
 
+    sim = [r for r in ran if r.get("user_sim")]
     checked_runs = [r for r in ran if isinstance((r.get("number_check") or {}).get("checked"), int)]
     n_checked = sum(r["number_check"]["checked"] for r in checked_runs)
     n_unsupported = sum(r["number_check"]["unsupported"] for r in checked_runs)
@@ -172,6 +174,11 @@ def metrics(runs: list[dict[str, Any]]) -> dict[str, Any]:
                               if any("subagents" in r for r in ran) else None),
         "subagents_total": len(subagents),
         "subagent_fail_rate": _rate(sum(1 for s in subagents if s.get("status") != "success"), len(subagents)),
+        "intent_ok_rate": (_rate(sum(1 for r in sim if r.get("intent_ok")), len(sim)) if sim else None),
+        "intent_ok_rate_asked": (_rate(sum(1 for r in sim if r.get("intent_ok") and r.get("asked")),
+                                       sum(1 for r in sim if r.get("asked"))) if sim else None),
+        "intent_ok_rate_not_asked": (_rate(sum(1 for r in sim if r.get("intent_ok") and not r.get("asked")),
+                                           sum(1 for r in sim if not r.get("asked"))) if sim else None),
         "numbers_checked": n_checked if checked_runs else None,
         "unsupported_number_rate": _rate(n_unsupported, n_checked) if checked_runs else None,
         "runs_with_unsupported_rate": (_rate(sum(1 for r in checked_runs if r["number_check"]["unsupported"]),
@@ -236,6 +243,9 @@ ROWS: list[tuple[str, str, Callable[[Any], str], int]] = [
     ("明确问题：平均总 token", "avg_tokens_clear", num, -1),
     ("明确问题中反问的比例", "ask_rate_clear", pct, -1),
     ("反问带 ≥2 个选项的比例", "ask_options_rate", pct, +1),
+    ("模拟用户：按用户真实意图答对的比例", "intent_ok_rate", pct, +1),
+    ("模拟用户：反问过的题，答对的比例", "intent_ok_rate_asked", pct, +1),
+    ("模拟用户：没反问的题，答对的比例", "intent_ok_rate_not_asked", pct, +1),
     ("多步/多角度题：平均耗时（秒）", "avg_duration_multi", num, -1),
     ("多角度题：平均耗时（秒）", "avg_duration_multiangle", num, -1),
     ("多角度题：平均 LLM 调用数", "avg_llm_calls_multiangle", num, -1),
@@ -296,6 +306,8 @@ def _why(r: dict[str, Any]) -> str:
         if need > 1 and r.get("charts_shown"):
             return f"只出了 {r.get('charts_shown')} 张图（要求至少 {need} 张）"
         return "没有生成图表"
+    if r.get("intent_ok") is False:
+        return "没有答到用户真正想问的（模拟用户）" + ("" if r.get("asked") else "，且没有反问")
     if r.get("mentions_ok") is False:
         return "结论与标准答案不符"
     nc = r.get("number_check") or {}

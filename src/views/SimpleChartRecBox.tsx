@@ -29,6 +29,7 @@ import { resolveRecommendedChart, getUrls, getTriggers, translateBackend } from 
 import { streamRequest, apiRequest } from '../app/apiClient';
 import { getErrorMessage } from '../app/errorCodes';
 import { Chart, ClarificationResponse, DictTable, FieldItem, createDictTable, InteractionEntry, computeInsightKey, TextTurn, TableSemanticsInfo, ROOTLESS_THREAD_ID, AgentPlanStep, ChartCheckIssue } from "../components/ComponentType";
+import { PerStep, chartLabel, lineTag, markToolDone, stepNumber, tagLine, takeLinesFor } from './subagentEvents';
 import { normalizeClarifyEvent, formatClarificationResponses } from '../app/clarification';
 import { parseDataOperation } from '../dataOperations/models';
 import { buildDictTableFromWorkspace } from '../app/tableThunks';
@@ -902,9 +903,11 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
             );
         }
 
-        // Track the last agent display_instruction (from "action" events)
-        let lastAgentDisplayInstruction: string | null = null;
-        let lastAgentInputTables: string[] = [];
+        // Track the last agent display_instruction (from "action" events).
+        // Kept per step: with sub-agents several steps chart at once and their
+        // events interleave ('' = the main agent).
+        const lastAgentDisplayInstruction = new PerStep<string | null>(() => null);
+        const lastAgentInputTables = new PerStep<string[]>(() => []);
 
         const genTableId = () => {
             let tableSuffix = Number.parseInt((Date.now() - Math.floor(Math.random() * 10000)).toString().slice(-6));
@@ -932,6 +935,14 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
             }
         };
         pushAgentPlan();
+        // "[Step 2] " tag for lines coming from a sub-agent (none for the main agent)
+        const stepLabelOf = (stepId?: string | null): string | null => {
+            if (!stepId) return null;
+            const n = stepNumber(agentPlan, stepId);
+            return n != null ? t('dataThread.stepTag', { n }) : String(stepId);
+        };
+        const stepTitleOf = (stepId?: string | null): string =>
+            (stepId && agentPlan.find(s => s.id === stepId)?.title) || '';
         const firstIssueText = (issues: ChartCheckIssue[]) => {
             const first = issues[0];
             return first ? translateBackend(first.message, first.code, first.params) : '';
@@ -1130,7 +1141,7 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
                 return;
             }
             // report-channel markdown deltas → stream into the report content.
-            if (result.type === "text_delta" && result.channel === "report") {
+            if (result.type === "text_delta" && result.channel === "report" && !result.step_id) {
                 ensureReport();
                 accumulatedReportMarkdown += result.content || '';
                 reportScheduleFlush();
@@ -1164,15 +1175,34 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
                 pushAgentPlan();
             }
 
+            // ── subagent: a plan step was handed to (or came back from) a sub-agent ──
+            if (result.type === "subagent" && result.step_id) {
+                const label = stepLabelOf(result.step_id) || String(result.step_id);
+                const title = result.title || stepTitleOf(result.step_id);
+                let line: string;
+                if (result.status === "started") {
+                    line = '📋 ' + t('dataThread.subagentStarted', { step: label, title });
+                } else if (result.status === "success" || result.status === "budget_exhausted") {
+                    line = '✓ ' + t('dataThread.subagentDone', { step: label, charts: result.charts ?? 0 });
+                } else {
+                    line = '⚠ ' + t('dataThread.subagentFailed', { step: label, status: result.status || '' });
+                }
+                thinkingSteps.push(line);
+                if (currentDraftId) {
+                    dispatch(dfActions.updateDraftRunningPlan({ draftId: currentDraftId, plan: thinkingSteps.join(STEP_SEP) }));
+                }
+            }
+
             // ── chart_check: rule-based self-check of a chart ──
             if (result.type === "chart_check") {
                 const issues: ChartCheckIssue[] = Array.isArray(result.issues) ? result.issues : [];
+                const checkLabel = stepLabelOf(result.step_id);
                 if (result.status === "retrying") {
-                    thinkingSteps.push('⚠ ' + t('dataThread.chartCheckRetrying', { detail: firstIssueText(issues) }));
+                    thinkingSteps.push('⚠ ' + tagLine(t('dataThread.chartCheckRetrying', { detail: firstIssueText(issues) }), checkLabel));
                 } else if (result.status === "fixed") {
-                    thinkingSteps.push('✓ ' + t('dataThread.chartCheckFixed'));
+                    thinkingSteps.push('✓ ' + tagLine(t('dataThread.chartCheckFixed'), checkLabel));
                 } else if (result.status === "warning") {
-                    thinkingSteps.push('⚠ ' + t('dataThread.chartCheckWarning', { detail: firstIssueText(issues) }));
+                    thinkingSteps.push('⚠ ' + tagLine(t('dataThread.chartCheckWarning', { detail: firstIssueText(issues) }), checkLabel));
                 }
                 if (currentDraftId) {
                     dispatch(dfActions.updateDraftRunningPlan({ draftId: currentDraftId, plan: thinkingSteps.join(STEP_SEP) }));
@@ -1189,7 +1219,7 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
 
             // ── thinking_text: LLM reasoning alongside tool calls ──
             // Accumulate into pendingThought; don't create a visible step
-            if (result.type === "thinking_text") {
+            if (result.type === "thinking_text" && !result.step_id) {
                 pendingThought += (pendingThought ? '\n' : '') + result.content;
                 // Only show as a step if there are no tool/action steps yet (initial thinking)
                 if (thinkingSteps.length === 0) {
@@ -1202,32 +1232,34 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
 
             // ── tool_start: agent is calling a tool (explore/inspect) ──
             if (result.type === "tool_start") {
+                const toolLabel = stepLabelOf(result.step_id);
+                const pushTool = (text: string) => thinkingSteps.push(tagLine(text, toolLabel));
                 // Show pending thought as a visible step before the tool step
-                if (pendingThought) {
+                if (pendingThought && !toolLabel) {
                     thinkingSteps.push(pendingThought);
                     pendingThought = '';
                 }
                 if (result.tool === "explore" || result.tool === "execute_python_script") {
                     const purpose = result.purpose || '';
                     if (purpose) {
-                        thinkingSteps.push(t('dataThread.runningCode') + ' ' + purpose);
+                        pushTool(t('dataThread.runningCode') + ' ' + purpose);
                     } else {
                         const codePreview = result.code || '';
                         const meaningfulLine = codePreview.split('\n').find((l: string) => l.trim() && !l.trim().startsWith('import ') && !l.trim().startsWith('from ')) || codePreview.split('\n')[0] || '';
-                        thinkingSteps.push(t('dataThread.runningCode') + (meaningfulLine ? `: ${meaningfulLine.trim()}` : ''));
+                        pushTool(t('dataThread.runningCode') + (meaningfulLine ? `: ${meaningfulLine.trim()}` : ''));
                     }
                 } else if (result.tool === "inspect_source_data") {
                     const tableNames = result.table_names?.join(', ') || '';
-                    thinkingSteps.push(t('dataThread.inspectingData') + (tableNames ? ` ${tableNames}` : ''));
+                    pushTool(t('dataThread.inspectingData') + (tableNames ? ` ${tableNames}` : ''));
                 } else if (result.tool === "inspect_chart") {
-                    thinkingSteps.push(t('dataThread.inspectingChart'));
+                    pushTool(t('dataThread.inspectingChart'));
                 } else if (result.tool === "load_skill") {
-                    thinkingSteps.push(t('dataThread.loadingSkill', { skill: result.skill || '' }));
+                    pushTool(t('dataThread.loadingSkill', { skill: result.skill || '' }));
                 } else if (result.tool === "search_data_tables" || result.tool === "search_knowledge") {
                     const query = result.query || '';
-                    thinkingSteps.push(t('dataThread.searching') + (query ? ` "${query}"` : ''));
+                    pushTool(t('dataThread.searching') + (query ? ` "${query}"` : ''));
                 } else if (["visualize", "clarify", "present", "action"].includes(result.tool)) {
-                    thinkingSteps.push(t('dataThread.producingAction', { action: result.tool }));
+                    pushTool(t('dataThread.producingAction', { action: result.tool }));
                 }
                 if (currentDraftId) {
                     dispatch(dfActions.updateDraftRunningPlan({ draftId: currentDraftId, plan: thinkingSteps.join(STEP_SEP) }));
@@ -1237,18 +1269,12 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
             // ── tool_result: mark the last tool step as done ──
             if (result.type === "tool_result") {
                 const isError = result.status === "error" || !!result.error;
-                for (let i = thinkingSteps.length - 1; i >= 0; i--) {
-                    const step = thinkingSteps[i];
-                    // Note lines (warnings / info) are not tool steps.
-                    if (step.startsWith('⚠') || step.startsWith('📋')) continue;
-                    if (!step.startsWith('✓') && !step.startsWith('✗')) {
-                        thinkingSteps[i] = (isError ? '✗ ' : '✓ ') + thinkingSteps[i];
-                        break;
-                    }
-                }
+                const resultLabel = stepLabelOf(result.step_id);
+                // only this agent's newest open line: sub-agent events interleave
+                thinkingSteps = markToolDone(thinkingSteps, lineTag(resultLabel), isError);
                 if (isError && result.error) {
                     const errPreview = String(result.error).split('\n').pop()?.trim() || String(result.error).slice(0, 120);
-                    thinkingSteps.push('⚠ ' + errPreview);
+                    thinkingSteps.push('⚠ ' + tagLine(errPreview, resultLabel));
                 }
                 if (currentDraftId) {
                     dispatch(dfActions.updateDraftRunningPlan({ draftId: currentDraftId, plan: thinkingSteps.join(STEP_SEP) }));
@@ -1257,10 +1283,11 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
 
             // ── action: agent chose what to do ──
             if (result.type === "action") {
-                lastAgentInputTables = result.input_tables || [];
+                lastAgentInputTables.set(result.step_id, result.input_tables || []);
                 if (result.action === "visualize") {
-                    lastAgentDisplayInstruction = result.display_instruction || null;
-                    thinkingSteps.push(t('dataThread.creatingChart') + (lastAgentDisplayInstruction ? ` ${lastAgentDisplayInstruction}` : ''));
+                    const instruction: string | null = result.display_instruction || null;
+                    lastAgentDisplayInstruction.set(result.step_id, instruction);
+                    thinkingSteps.push(tagLine(t('dataThread.creatingChart') + (instruction ? ` ${instruction}` : ''), stepLabelOf(result.step_id)));
                     if (currentDraftId) {
                         dispatch(dfActions.updateDraftRunningPlan({ draftId: currentDraftId, plan: thinkingSteps.join(STEP_SEP) }));
                     }
@@ -1286,7 +1313,14 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
                 if (tables.find(t => t.id === candidateTableId) || createdTables.some(t => t.id === candidateTableId)) {
                     candidateTableId = genTableId();
                 }
-                const displayInstruction = lastAgentDisplayInstruction || refinedGoal?.display_instruction || t('chartRec.explorationStep', { step: createdTables.length + 1, question });
+                const chartStepId: string | undefined = result.step_id;
+                const chartStepLabel = stepLabelOf(chartStepId);
+                const displayInstruction = chartLabel(
+                    lastAgentDisplayInstruction.get(chartStepId) || refinedGoal?.display_instruction || t('chartRec.explorationStep', { step: createdTables.length + 1, question }),
+                    chartStepLabel,
+                );
+                // this chart's history = its own agent's lines; other steps keep theirs
+                const { own: chartLines, rest: otherLines } = takeLinesFor(thinkingSteps, lineTag(chartStepLabel));
 
                 // An empty workspace has no source table: the agent built this
                 // data itself, so the step hangs off the rootless thread.
@@ -1294,7 +1328,8 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
 
                 const candidateTable = createDictTable(candidateTableId, rows, undefined);
                 // Resolve source tables from agent's input_tables (names it chose to use)
-                const agentInputNames = lastAgentInputTables.length > 0 ? lastAgentInputTables : (refinedGoal?.input_tables || []);
+                const stepInputTables = lastAgentInputTables.get(chartStepId);
+                const agentInputNames = stepInputTables.length > 0 ? stepInputTables : (refinedGoal?.input_tables || []);
                 const resolvedSourceIds = (agentInputNames as string[]).length > 0
                     ? selectedTableIds.filter((id: string) => {
                         const tbl = tables.find(t2 => t2.id === id);
@@ -1321,7 +1356,7 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
                             ...currentDraftInteraction,
                             {
                                 from: 'data-agent' as const, to: 'datarec-agent' as const, role: 'instruction' as const,
-                                plan: [pendingThought, ...thinkingSteps.filter(s => s.trim())].filter(Boolean).join('\x1E') || undefined,
+                                plan: [chartStepLabel ? '' : pendingThought, ...chartLines.filter(s => s.trim())].filter(Boolean).join('\x1E') || undefined,
                                 content: question || displayInstruction,
                                 displayContent: displayInstruction,
                                 inputTableNames: resolvedSourceNames,
@@ -1330,10 +1365,10 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
                         ],
                     }
                 };
-                lastAgentDisplayInstruction = null;
-                lastAgentInputTables = [];
-                thinkingSteps = []; // reset for next chart
-                pendingThought = ''; // reset for next chart
+                lastAgentDisplayInstruction.clear(chartStepId);
+                lastAgentInputTables.clear(chartStepId);
+                thinkingSteps = otherLines; // reset for next chart (other steps keep running)
+                if (!chartStepLabel) pendingThought = ''; // reset for next chart
                 if (transformedData.virtual) {
                     candidateTable.virtual = { tableId: transformedData.virtual.table_name, rowCount: transformedData.virtual.row_count };
                     // Use the backend name as display name even if ID was regenerated to avoid conflicts

@@ -1,0 +1,22 @@
+{
+  "endpoint": "openai",
+  "model": "deepseek-flash",
+  "api_base": "https://api.deepseek.com",
+  "api_version": "",
+  "package": "alidade",
+  "src": "D:\\code\\alidade\\py-src",
+  "questions": 13,
+  "demos": "D:\\code\\alidade\\public\\demos",
+  "only": "ambiguous,clarify,cleaning",
+  "repeat": 2,
+  "jobs": 3,
+  "timeout": 600,
+  "env_file": "D:\\code\\alidade\\eval\\.env",
+  "max_iterations": 10,
+  "max_answers": 2,
+  "language": "zh",
+  "judge": true,
+  "user_sim": false,
+  "out": "D:\\code\\alidade\\eval\\results\\new-focus-clean",
+  "started": "2026-10-11 13:23:02"
+}

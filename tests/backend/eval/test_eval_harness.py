@@ -145,7 +145,7 @@ def _rec(**over):
 def test_expect_ask_requires_asking_before_any_chart():
     q = {"expect_ask": True}
     assert run_eval.grade(q, _rec(asked=1, charts_before_ask=0)) == {
-        "mentions_ok": None, "clarified_first": True, "grounded": None, "success": True}
+        "mentions_ok": None, "clarified_first": True, "grounded": None, "intent_ok": None, "success": True}
     late = run_eval.grade(q, _rec(asked=1, charts_before_ask=2))
     assert late["clarified_first"] is False and late["success"] is False
     never = run_eval.grade(q, _rec(asked=0))
@@ -396,3 +396,57 @@ def test_plan_round_metrics():
     m = report.metrics(runs)
     assert m["avg_plan_updates"] == 2 and m["calls_dropped"] == 1
     assert report.metrics([_run()])["avg_plan_updates"] is None      # records from before
+
+
+# ── simulated user with a hidden intent ──
+
+def test_intent_questions_are_well_formed():
+    qs = [q for q in _questions().values() if q.get("intent")]
+    assert len(qs) >= 8 and {q["category"] for q in qs} == {"ambiguous", "clarify"}
+    for q in qs:
+        assert q["intent"]["text"] and (q["intent"].get("mentions_any") or q["intent"].get("answer_number"))
+        assert run_eval.answer_ok(q["intent"], q["intent"]["note"]) is True, q["id"]
+
+
+def test_user_sim_grades_against_the_intent():
+    q = _questions()["clarify-movie-success"]
+    right = _rec(summary="按回报率，Jurassic Park 最高", user_sim=True, asked=1, charts_before_ask=0)
+    wrong = _rec(summary="Avatar 全球票房最高", user_sim=True, asked=0)
+    assert run_eval.grade(q, right)["success"] is True and run_eval.grade(q, right)["intent_ok"] is True
+    g = run_eval.grade(q, wrong)
+    assert g["intent_ok"] is False and g["success"] is False
+    # without --user-sim the intent is ignored (default grading: must ask first)
+    assert run_eval.grade(q, _rec(summary="Avatar", asked=0))["intent_ok"] is None
+
+
+def test_simulate_user_answers_from_the_intent_and_is_not_metered(monkeypatch):
+    from types import SimpleNamespace
+    seen = {}
+
+    class Client:
+        def get_completion(self, messages, stream=False):
+            seen["prompt"] = messages[0]["content"]
+            seen["metered"] = run_eval.METER.enabled
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=" 看回报率 "))])
+
+    interact = {"context": "数据有票房和预算", "questions": [
+        {"text": "用哪个标准？", "options": [{"label": "全球票房"}, {"label": "投资回报率"}]}]}
+    assert run_eval.simulate_user(Client(), "我想看回报率", interact) == "看回报率"
+    assert "我想看回报率" in seen["prompt"] and "全球票房 / 投资回报率" in seen["prompt"]
+    assert seen["metered"] is False and run_eval.METER.enabled is True
+
+    class Broken:
+        def get_completion(self, *a, **k):
+            raise RuntimeError("down")
+    assert run_eval.simulate_user(Broken(), "x", interact) == "全球票房"     # falls back to option 1
+
+
+def test_user_sim_metrics_split_by_asking():
+    runs = [_run(user_sim=True, intent_ok=True, asked=1), _run(user_sim=True, intent_ok=False, asked=0),
+            _run(user_sim=True, intent_ok=True, asked=0), _run()]
+    m = report.metrics(runs)
+    assert m["intent_ok_rate"] == pytest.approx(2 / 3)
+    assert m["intent_ok_rate_asked"] == 1.0 and m["intent_ok_rate_not_asked"] == 0.5
+    assert report.metrics([_run()])["intent_ok_rate"] is None
+    assert report._why(_run(success=False, chart_ok=True, intent_ok=False, asked=0)) == \
+        "没有答到用户真正想问的（模拟用户），且没有反问"

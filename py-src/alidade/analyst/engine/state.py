@@ -54,6 +54,11 @@ class AnalystState(TypedDict, total=False):
     chart_retries: dict[str, int]
     compressed_upto: int        # messages[:compressed_upto] already summarised
 
+    # ── parallel sub-agents (ALIDADE_SUBAGENTS=1) ──────────────────────
+    after_tools: str            # "agent", or "subagents" when a new plan can be fanned out
+    dispatched_steps: list[str]  # plan step ids already handed to sub-agents
+    subagent_rounds: int        # fan-out rounds so far (bounded)
+
     # ── outcome ────────────────────────────────────────────────────────
     final_text: str
     status: str                 # success | max_iterations | tool_rounds_exhausted | llm_error

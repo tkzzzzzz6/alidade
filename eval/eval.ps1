@@ -41,6 +41,8 @@ param(
     [int]$Jobs = 0,      # 0 = EVAL_JOBS 或 3
     [int]$Repeat = 0,    # 0 = EVAL_REPEAT 或 2
     [switch]$NoJudge,
+    # 模拟用户：带 intent 的题由一个 LLM 扮演用户回答反问，并按用户真实意图判分
+    [switch]$UserSim,
     # 只跑部分题：题目 id、类别（trap / ambiguous ...）或数据集（movies ...），逗号分隔；
     # -Only a,b,c 和 -Only "a,b,c" 都可以
     [string[]]$Only = @(),
@@ -110,6 +112,7 @@ if ($Jobs -le 0) { $Jobs = [int](Get-Setting '' 'EVAL_JOBS' '3') }
 if ($Repeat -le 0) { $Repeat = [int](Get-Setting '' 'EVAL_REPEAT' '2') }
 if ($Timeout -le 0) { $Timeout = [int](Get-Setting '' 'EVAL_TIMEOUT' '600') }
 if (-not $NoJudge -and (Get-Setting '' 'EVAL_NO_JUDGE' '') -in @('1', 'true', 'yes')) { $NoJudge = [switch]$true }
+if (-not $UserSim -and (Get-Setting '' 'EVAL_USER_SIM' '') -in @('1', 'true', 'yes')) { $UserSim = [switch]$true }
 if (-not $LegacyDir) { $LegacyDir = Join-Path (Split-Path $Root -Parent) 'alidade-legacy' }
 if (-not $Tag) { $Tag = ($Model -replace '[^A-Za-z0-9._-]', '_') }
 
@@ -166,6 +169,7 @@ function Invoke-Eval {
     if ($Src) { $argsList += @('--src', $Src) }
     if ($OnlyIds) { $argsList += @('--only', $OnlyIds) }
     if ($Judge) { $argsList += '--judge' }
+    if ($UserSim) { $argsList += '--user-sim' }
     Invoke-Python $argsList
 }
 

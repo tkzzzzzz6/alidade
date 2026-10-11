@@ -23,6 +23,7 @@ import { AgentPlanStep } from '../components/ComponentType';
 import { QueuedMessage } from '../app/messageQueue';
 import { iconVar, textVar } from '../app/layout';
 import { planProgress } from './AgentPlanChecklist';
+import { parallelSteps } from './subagentEvents';
 
 const STEP_MARKERS = /^(✓|✗|⚠|📋)\s*/u;
 
@@ -58,6 +59,7 @@ export const AgentStatusLine: FC<{
     const elapsed = useElapsedSeconds(startedAt);
     const step = latestStepText(runningPlan) || t('dataThread.thinking');
     const progress = agentPlan && agentPlan.length > 0 ? planProgress(agentPlan) : null;
+    const parallel = parallelSteps(agentPlan);
 
     return (
         <Box
@@ -76,6 +78,11 @@ export const AgentStatusLine: FC<{
             >
                 {step}
             </Typography>
+            {parallel.length > 1 && (
+                <Typography data-testid="agent-parallel-steps" sx={{ fontSize: textVar.xxs, color: 'primary.main', flexShrink: 0 }}>
+                    {t('dataThread.parallelSteps', { steps: parallel.join(t('dataThread.stepListSep')) })}
+                </Typography>
+            )}
             {progress && progress.total > 0 && (
                 <Typography sx={{ fontSize: textVar.xxs, color: 'text.disabled', flexShrink: 0 }}>
                     {t('dataThread.planProgress', progress)}

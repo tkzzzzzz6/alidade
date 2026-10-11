@@ -17,13 +17,18 @@ is kept in [docs/upstream/CHANGELOG.md](docs/upstream/CHANGELOG.md).
 - Line-chart check: more than 10 lines is a warning, more than 20 is sent back for repair.
 - Plan progress advances by itself when a chart is shown (`plan_step` names the step when it is not the one in progress), a plan change can ride along with an action, and plans start at three steps: no more LLM round trips just to tick a checklist.
 - Several inspection calls (table structure, queries) can come back in one LLM reply instead of one per reply (`ALIDADE_PARALLEL_TOOLS`, on by default); actions are still one per turn.
-- Plans can mark which steps depend on which (`ALIDADE_SUBAGENTS=1`, experimental): groundwork for parallel sub-agents.
+- Parallel sub-agents (`ALIDADE_SUBAGENTS=1`, experimental): independent plan steps are handed to sub-agents that run at the same time (own Python session, 2-chart budget, no questions to the user, timeout and failure isolation), and their findings are merged by the main agent.
+- Sub-agent progress in the UI: lines from each parallel step are tagged ("[Step 2] …") and closed per step, each chart is labelled with its step, and the status line says which steps run at the same time. Stopping a run now also stops its running sub-agents.
+- When a question is partly outside the loaded data (a year or field that is not there), the agent answers what the data supports and says what is missing instead of stopping to ask.
+- `ALIDADE_PLAN_AUTO_ADVANCE=0` switches plan auto-advance off, for A/B evaluation only.
 - Data quality check: each table in the agent's context comes with code-computed notes on duplicate rows, numbers or dates stored as text (and mixed date formats), the same label spelled differently, and missing values, each with the fix.
 
 ### Evaluation
 - `eval/`: a harness that runs a question set against a real model and compares two versions (success, chart errors, clarification, tokens, time), with one-command scripts (`eval.ps1` / `eval.bat` / `eval.sh`) and keys in `eval/.env`.
 - Token accounting: provider-reported prefix-cache hits, uncached input tokens, and tokens spent before the user confirms a direction.
 - Number provenance check (`analyst/engine/number_check.py`): every number in a conclusion is traced to the run's printed output, chart data, input tables or simple derived values; the evaluation reports how many cannot be traced, with grounding questions that invite made-up numbers. Measurement only for now.
+- Simulated user (`--user-sim`): clarification questions carry a hidden intent; the model plays the user when the agent asks, and the run is graded on whether the conclusion matches what the user actually wanted, split by "asked first" vs "guessed".
+- Three-step questions (`planned`) to measure plan auto-advance.
 - Multi-angle questions (two independent analyses in one request) with duration, LLM-call and parallel-plan metrics.
 - Harder questions: dirty data (string amounts, mixed date formats, duplicates), multi-table joins, and questions that must be clarified first; numeric and multi-part answer checks.
 

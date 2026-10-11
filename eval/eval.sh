@@ -6,7 +6,7 @@
 # 配置写在 eval/.env（模板 eval/.env.example）；终端里已设置的同名环境变量优先：
 #   EVAL_API_KEY（都没有时会提示输入）  EVAL_MODEL（默认 deepseek-chat）
 #   EVAL_API_BASE（默认 https://api.deepseek.com）  EVAL_ENDPOINT（默认 openai）
-#   EVAL_TAG  EVAL_JOBS=3  EVAL_REPEAT=2  EVAL_ONLY  EVAL_NO_JUDGE=1  EVAL_TIMEOUT=600
+#   EVAL_TAG  EVAL_JOBS=3  EVAL_REPEAT=2  EVAL_ONLY  EVAL_NO_JUDGE=1  EVAL_TIMEOUT=600  EVAL_USER_SIM=1
 #   LEGACY_COMMIT（默认：上游 5477f0e2，找不到就用仓库第一个提交）  LEGACY_DIR=../alidade-legacy
 set -euo pipefail
 
@@ -77,6 +77,7 @@ run_eval() {  # run_eval <out> <package> <src|""> <only|""> <repeat> <judge 0/1>
   [ -n "$3" ] && args+=(--src "$3")
   [ -n "$4" ] && args+=(--only "$4")
   [ "$6" = "1" ] && args+=(--judge)
+  case "${EVAL_USER_SIM:-0}" in 1|true|yes) args+=(--user-sim) ;; esac
   "$PY" "${args[@]}"
 }
 

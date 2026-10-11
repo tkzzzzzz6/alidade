@@ -23,6 +23,7 @@ conversation never has to round-trip through the browser.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import uuid
 from typing import Any, Callable, Generator
@@ -153,6 +154,9 @@ class AnalystAgent:
         run_id = resume_run_id or uuid.uuid4().hex
         self._skill_state = {}
         self.executor = CodeExecutor(self.workspace, run_id)
+        # set when this run ends for any reason, including the client going away
+        # (Stop): running sub-agents watch it and stop too
+        self.run_ended = threading.Event()
         held: list[dict[str, Any]] = []
         outcome = "aborted"
 
@@ -199,13 +203,22 @@ class AnalystAgent:
                         "max_iterations": self.max_iterations,
                     }
 
-                for event in graph.stream(graph_input, config, stream_mode="custom", durability="exit"):
-                    if not isinstance(event, dict):
-                        continue
-                    if event.get("type") in _TERMINAL_EVENTS:
-                        held.append(event)
-                    else:
-                        yield event
+                # Keep a reference to the stream: if the client goes away (Stop),
+                # closing it waits for the running node, so tell running
+                # sub-agents to stop first.
+                stream = graph.stream(graph_input, config, stream_mode="custom", durability="exit")
+                try:
+                    for event in stream:
+                        if not isinstance(event, dict):
+                            continue
+                        if event.get("type") in _TERMINAL_EVENTS:
+                            held.append(event)
+                        else:
+                            yield event
+                except GeneratorExit:
+                    self.run_ended.set()
+                    stream.close()
+                    raise
 
                 snapshot = graph.get_state(config)
                 if snapshot.next:
@@ -218,6 +231,7 @@ class AnalystAgent:
                     self.executor.close(discard_saved=True)
             yield from held
         finally:
+            self.run_ended.set()
             if self.executor is not None:
                 self.executor.close()
             rlog.log(
