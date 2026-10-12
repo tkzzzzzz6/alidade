@@ -43,6 +43,11 @@ param(
     [switch]$NoJudge,
     # 模拟用户：带 intent 的题由一个 LLM 扮演用户回答反问，并按用户真实意图判分
     [switch]$UserSim,
+    # 模型分工：日常步骤用这个更便宜的模型（同一服务商），-Model 是强模型
+    [string]$FastModel = '',
+    # 按思考强度分工：关键步骤 / 常规步骤的 reasoning effort（如 high / low），可以和 -FastModel 一起用
+    [string]$StrongEffort = '',
+    [string]$FastEffort = '',
     # 只跑部分题：题目 id、类别（trap / ambiguous ...）或数据集（movies ...），逗号分隔；
     # -Only a,b,c 和 -Only "a,b,c" 都可以
     [string[]]$Only = @(),
@@ -113,6 +118,9 @@ if ($Repeat -le 0) { $Repeat = [int](Get-Setting '' 'EVAL_REPEAT' '2') }
 if ($Timeout -le 0) { $Timeout = [int](Get-Setting '' 'EVAL_TIMEOUT' '600') }
 if (-not $NoJudge -and (Get-Setting '' 'EVAL_NO_JUDGE' '') -in @('1', 'true', 'yes')) { $NoJudge = [switch]$true }
 if (-not $UserSim -and (Get-Setting '' 'EVAL_USER_SIM' '') -in @('1', 'true', 'yes')) { $UserSim = [switch]$true }
+$FastModel = Get-Setting $FastModel 'EVAL_FAST_MODEL' ''
+$StrongEffort = Get-Setting $StrongEffort 'EVAL_STRONG_EFFORT' ''
+$FastEffort = Get-Setting $FastEffort 'EVAL_FAST_EFFORT' ''
 if (-not $LegacyDir) { $LegacyDir = Join-Path (Split-Path $Root -Parent) 'alidade-legacy' }
 if (-not $Tag) { $Tag = ($Model -replace '[^A-Za-z0-9._-]', '_') }
 
@@ -170,6 +178,9 @@ function Invoke-Eval {
     if ($OnlyIds) { $argsList += @('--only', $OnlyIds) }
     if ($Judge) { $argsList += '--judge' }
     if ($UserSim) { $argsList += '--user-sim' }
+    if ($FastModel) { $argsList += @('--fast-model', $FastModel) }
+    if ($StrongEffort) { $argsList += @('--strong-effort', $StrongEffort) }
+    if ($FastEffort) { $argsList += @('--fast-effort', $FastEffort) }
     Invoke-Python $argsList
 }
 

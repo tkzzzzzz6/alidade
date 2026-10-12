@@ -4,7 +4,7 @@
 # fresh workspace. Fields:
 #   id         unique id
 #   dataset    key in `datasets` below
-#   category   lookup | trend | multistep | trap | ambiguous | cleaning | join | clarify | multiangle | grounding | planned
+#   category   lookup | trend | multistep | trap | ambiguous | cleaning | join | clarify | multiangle | grounding | planned | memory | insights
 #                lookup    — one factual answer, checked by `mentions_any`
 #                trend     — a chart is the answer
 #                multistep — derive a metric, then chart it
@@ -23,6 +23,12 @@
 #                planned   — three separate analyses in one request: long enough
 #                            that the agent writes a plan (≥3 steps); measures
 #                            what keeping the plan up to date costs
+#                memory    — a vague question that must be clarified, then a
+#                            `followup` in the same user home that uses the same
+#                            word: with saved definitions the agent should answer
+#                            it without asking again (run with --user-sim)
+#                insights  — the user asks what stands out; the answer must name the
+#                            main patterns that are really in the data (no question back)
 #                grounding — invites a made-up number (data that is not
 #                            there, a figure the model "knows" from memory, or
 #                            arithmetic done in its head); every number in the
@@ -42,6 +48,9 @@
 #              and `note`. With `run_eval.py --user-sim` an LLM plays the user
 #              and answers the agent's questions from `text`; the answer is
 #              graded against this check instead of the default one.
+#   followup   {question, mentions_any / mentions_all / answer_number, note}: asked after the
+#              first question finished, in the same workspace and user home; graded
+#              with these checks and counted in the `memory` metrics
 #   max_unsupported  at most this many numbers in the answer may lack a source
 #                 in the run's output, the chart data or the input tables
 #                 (checked by py-src/alidade/analyst/engine/number_check.py)
@@ -564,3 +573,96 @@ questions:
     mentions_all: [["Government", "政府"], ["Agriculture", "农业"]]
     answer_number: {value: 12.37, tolerance: 0.01}
     note: ① Government 约 2.58%；② Agriculture 约 9.84%（Construction 约 9.43% 次之）；③ 2006 年约 6.68%、2009 年约 19.05%，高约 12.37 个百分点。
+
+  # ── Memory: ask once, remember what the user meant (saved definitions) ──
+  # Run with --user-sim: the first answer settles the meaning, the follow-up uses
+  # the same word. Follow-up answers follow the intent's definition.
+  - id: memory-movie-success
+    dataset: movies
+    category: memory
+    question: 哪部电影最成功？
+    expect_ask: true
+    intent:
+      text: "我说的\"成功\"是投资回报率，也就是全球票房除以制作预算，而且只看制作预算至少 5000 万美元的电影。"
+      mentions_any: ["Jurassic Park", "侏罗纪公园"]
+      note: "Jurassic Park 约 14.65 倍最高。"
+    followup:
+      question: 那 2000 年以后上映的电影里，最成功的是哪部？
+      mentions_any: ["New Moon", "Twilight", "暮光之城"]
+      note: "按回报率（预算 ≥ 5000 万）：The Twilight Saga: New Moon 约 14.05 倍，Shrek 2 约 13.14 倍次之。"
+    note: 第二问应沿用第一问确定的"成功"口径，不再反问。
+  - id: memory-best-industry
+    dataset: unemployment
+    category: memory
+    question: 哪个行业最好？
+    expect_ask: true
+    intent:
+      text: "\"最好\"指金融危机期间最抗跌：2007 年到 2009 年，年均失业率上升最少的行业。"
+      mentions_any: ["Government", "政府"]
+      note: "Government 只上升约 1.28 个百分点。"
+    followup:
+      question: 除了政府部门，最好的行业是哪个？
+      mentions_any: ["Education and Health", "教育和医疗", "教育与健康", "教育和健康", "教育与医疗"]
+      note: "Education and Health 约 2.30 个百分点，Self-employed 约 2.65 次之。"
+    note: 第二问应沿用"最好 = 危机中失业率上升最少"。
+  - id: memory-distributor-reputation
+    dataset: movies
+    category: memory
+    question: 哪家发行商的电影口碑最好？
+    expect_ask: true
+    intent:
+      text: "口碑看平均 IMDB 评分，只算至少 20 部电影的发行商。"
+      mentions_any: ["Focus Features"]
+      note: "Focus Features 约 7.14（32 部）。"
+    followup:
+      question: 口碑排第二的发行商是哪家？
+      mentions_any: ["Sony Pictures Classics", "Sony Classics", "索尼经典"]
+      note: "按平均 IMDB（≥ 20 部）：Sony Pictures Classics 约 6.95 第二，Fox Searchlight 约 6.64 第三。"
+    note: 第二问应沿用"口碑 = 平均 IMDB，至少 20 部"。
+  - id: memory-stock-risk
+    dataset: stocks
+    category: memory
+    question: 哪只股票风险最小？
+    expect_ask: true
+    intent:
+      text: "风险看日收益率的波动（标准差），越小越稳。"
+      mentions_any: ["MSFT", "微软", "Microsoft"]
+      note: "整个区间 MSFT 日收益率标准差约 1.18% 最小。"
+    followup:
+      question: 从 2025 年 10 月 1 日算起，风险最小的是哪只？
+      mentions_any: ["AAPL", "苹果", "Apple"]
+      note: "2025-10-01 起 AAPL 日收益率标准差约 1.16% 最小，MSFT 约 1.27% 次之。"
+    note: 第二问应沿用"风险 = 日收益率标准差"。
+
+  # ── Insights: "what stands out?" — explicit requests for an automatic overview ──
+  - id: insights-energy
+    dataset: energy
+    category: insights
+    question: 自动扫描这份能源数据，告诉我最值得关注的发现。
+    chart: true
+    min_charts: 2
+    mentions_all: [["可再生", "renewable", "Renewable"], ["China", "中国"]]
+    note: >-
+      各国可再生能源发电量普遍快速上升（按各国自身均值归一后约 +229%）；化石能源发电和 CO₂ 增幅最大的都是中国
+      （化石 +366%、CO₂ +220%），英国化石发电降幅最大（−55%）；日本核电降幅最大（−86%）。
+  - id: insights-stocks
+    dataset: stocks
+    category: insights
+    question: 帮我自动扫一遍这些股票数据，有什么值得注意的？
+    chart: true
+    min_charts: 2
+    mentions_all: [["GOOGL", "谷歌", "Alphabet"], ["META", "Meta"]]
+    note: >-
+      区间首尾收盘价：GOOGL +73.9% 最高，META −12.9% 最低，6 只里 4 只上涨；所有股票成交量都下降；
+      收盘价和成交量负相关（Spearman 约 −0.82，主要来自不同股票的价位差异）。
+  - id: insights-unemployment
+    dataset: unemployment
+    category: insights
+    question: 自动分析一下这份失业数据里最突出的规律。
+    chart: true
+    min_charts: 2
+    mentions_all: [["Mining", "采矿", "采掘"], ["2008", "2009", "金融危机", "危机", "经济衰退"]]
+    note: >-
+      2000–2010 年 14 个行业的失业人数全部上升，Mining and Extraction 增幅最大（约 +316%）；
+      2008–2009 年金融危机期间失业人数和失业率明显跳升；行业间失业率差异大（Agriculture 最高、Government 最低）。
+

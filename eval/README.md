@@ -4,11 +4,12 @@
 
 | 文件 | 作用 |
 |---|---|
-| `questions.yaml` | 54 道题，11 类问题（见下表），用到 5 个自带数据集和 `data/` 里的 3 张表 |
+| `questions.yaml` | 61 道题，13 类问题（见下表），用到 5 个自带数据集和 `data/` 里的 3 张表 |
 | `data/` | 额外的评测数据：脏数据 `messy_sales.csv`、用于多表关联的 `stock_info.csv` 和 `country_continent.csv`；由 `data/make_data.py` 生成（固定随机种子，重跑结果一样） |
 | `run_eval.py` | 运行器：每道题一个子进程、一个全新的工作区，直接调用 Agent（不经过浏览器和 Flask） |
 | `report.py` | 汇总一次运行，或对比两次运行 |
 | `number_control.py` | 数字溯源检查的对照实验：误报和查出率（见"数字溯源"） |
+| `insights_benchmark.py` | 洞察扫描的基准：在埋了已知规律的合成表上测召回和误报（不调模型） |
 
 ## 题目分类
 
@@ -24,6 +25,8 @@
 | `clarify` 必须先澄清 | 3 | 问题本身有歧义或涉及投资建议，**必须在出任何图之前先反问**，出了图再问也算失败 |
 | `multiangle` 多角度分析 | 4 | 一个问题里有 2 个互不依赖的分析角度（如"收益率谁最高"和"成交量谁最大"），每个角度都要答对，且至少 2 张图。用来衡量并行（多工具调用、子 Agent）能省多少时间 |
 | `planned` 三步分析 | 4 | 一个问题里有 3 个要分别出图的分析，至少 3 张图，每个都要答对。用来衡量"计划随出图自动推进"（`ALIDADE_PLAN_AUTO_ADVANCE`）省了多少 LLM 调用和时间 |
+| `memory` 口径记忆 | 4 | 先问一个必须澄清的模糊问题，再在同一个用户目录里问一个用到同一个词的追问。追问时应该沿用第一次确定的口径、不再反问，并且答对。要配合 `-UserSim` 跑 |
+| `insights` 自动发现洞察 | 3 | 用户明确要"自动扫描、看看有什么值得关注的"：不反问，至少 2 张图，结论要说到数据里真正最突出的规律 |
 | `grounding` 数字溯源 | 5 | 诱导模型编数字：问数据里没有的年份、缺失值，问一个网上流传着另一个答案的数，或要求心算。结论里**每个数字都必须找得到出处**，并且答案正确 |
 
 ## 一键脚本（推荐）
@@ -118,7 +121,7 @@ python eval/run_eval.py --endpoint openai --api-base https://api.deepseek.com --
 - `--judge`：再让同一个模型对照参考答案给每题打 1–5 分（会额外消耗一些 token）。
 - `--only`：只跑部分题，可以写题目 id、类别（`trap`、`cleaning`、`clarify` 等）或数据集（`movies`、`messy_sales` 等），逗号分隔。
 
-一道题大约 3–5 万 token（系统提示词每次调用都要带上），54 道题一轮大约 190–320 万 token。
+一道题大约 3–5 万 token（系统提示词每次调用都要带上），61 道题一轮大约 220–360 万 token。
 
 ## 4. 跑改造前的版本做对比
 
@@ -148,6 +151,81 @@ python eval/report.py eval/results/old-deepseek eval/results/new-deepseek --labe
 ```
 
 报告是一张"指标 | 改造前 | 改造后 | 变化"的表，变好标 ✅、变差标 ⚠️。后面附有分类成功率，以及两个版本结果不同的题目。
+
+## 按任务分配模型（`-FastModel`）
+
+`-Model` 是强模型（网页里用户选的那个），`-FastModel` 是同一服务商更便宜的模型（设置 `ALIDADE_FAST_MODEL`）。规则见 `py-src/alidade/analyst/engine/routing.py`：
+
+- 读问题、读用户的回答、上一步失败后：用强模型；
+- 其余步骤（看表、写下一张图的代码、子 Agent）：用小模型；
+- 小模型写的最终结论如果为空，或有在本次运行里找不到出处的数字，交给强模型重写。
+
+```powershell
+.\eval\eval.ps1 new -Model "强模型名" -Only multistep,planned,ambiguous -Tag route-off
+.\eval\eval.ps1 new -Model "强模型名" -FastModel "小模型名" -Only multistep,planned,ambiguous -Tag route-on
+python eval/report.py eval/results/new-route-off eval/results/new-route-on --labels 只用强模型 按任务分配 --out eval/results/compare-routing.md
+```
+
+报告新增"每题平均费用""强模型调用占比""小模型的结论被强模型重写的题数"三行，以及按模型拆开的 token（记录在 `runs.jsonl` 的 `by_model`）。费用按 `EVAL_PRICES` 估算，写在 `eval/.env` 或环境变量里，单位是每百万 token、任意货币（输入 / 命中缓存的输入 / 输出）：
+
+```
+EVAL_PRICES=强模型名=4/1/16;小模型名=1/0.25/2
+```
+
+"强模型名" / "小模型名" 要换成服务商实际的模型名（引号保留或去掉都可以）（和 `-Model` / `-FastModel` 一致），价格以服务商当前的价目表为准，这里的数字只是格式示例。注意：两个模型交替调用时，各自的前缀缓存是分开的，缓存命中率可能下降，所以要看"未命中缓存的输入 token"和估算费用，不能只看总 token。
+
+### 同一个模型、不同思考强度（`-StrongEffort` / `-FastEffort`）
+
+只用一个模型时，也可以按思考强度分工：关键步骤用高思考，常规步骤用低思考（设置 `ALIDADE_STRONG_EFFORT` / `ALIDADE_FAST_EFFORT`）。例如只用 DeepSeek：
+
+```powershell
+# 对照：现在的默认做法
+.\eval\eval.ps1 new -Model deepseek-flash -Only multistep,planned,ambiguous -Tag effort-default
+# 按思考强度分工：关键步骤 high，常规步骤 low
+.\eval\eval.ps1 new -Model deepseek-flash -StrongEffort high -FastEffort low -Only multistep,planned,ambiguous -Tag effort-route
+# 全部 low：看分工比"一律低思考"好多少
+.\eval\eval.ps1 new -Model deepseek-flash -StrongEffort low -FastEffort low -Only multistep,planned,ambiguous -Tag effort-low
+python eval/report.py eval/results/new-effort-default eval/results/new-effort-route --labels 默认 按思考强度分工
+python eval/report.py eval/results/new-effort-low eval/results/new-effort-route --labels 全部low 按思考强度分工
+```
+
+注意：Agent 平时配置的思考强度（`low`）在 DeepSeek 这类 LiteLLM 不认识的模型上会被 LiteLLM 丢掉，请求里根本没有这个参数，DeepSeek 就用它自己的默认值（思考开、`high`）。所以之前所有用 deepseek-flash 跑的评测，实际都是 `high`，"默认"那组也就是"全部 high"。只有设置了 `-StrongEffort` / `-FastEffort` 时，代码才会明确把思考强度发出去。思考内容算在输出 token 里，所以报告里要看"每次调用的平均输出 token"和估算费用。
+
+## 口径记忆（`memory` 题）
+
+用户回答了"最成功指什么"之后，Agent 用 `save_definition` 把这个词义存到用户目录；之后在同样的表上用到同一个词，会直接沿用并说明。`memory` 题在第一问结束后，用同一个工作区、同一个用户目录再问一个追问，记录追问时是否又反问、花了多少 token、是否答对。
+
+```powershell
+# 关 vs 开（ALIDADE_DEFINITIONS=0 时既不保存也不使用）
+$env:ALIDADE_DEFINITIONS = '0'; .\eval\eval.ps1 new -Only memory -UserSim -Tag memory-off; Remove-Item Env:ALIDADE_DEFINITIONS
+.\eval\eval.ps1 new -Only memory -UserSim -Tag memory-on
+python eval/report.py eval/results/new-memory-off eval/results/new-memory-on --labels 不记口径 记住口径 --out eval/results/compare-memory.md
+```
+
+看"第二问又反问的比例""第二问的平均 token""第二问答对的比例"。每道题都在自己的临时 `ALIDADE_HOME` 里跑，你本机已保存的口径和规则不会影响评测。
+
+## 自动发现洞察（`insights` 题与基准）
+
+`find_insights` 不调模型，用统计检验找趋势、突变、组间差异、相关、异常值和集中度，所有检验一起做 Benjamini–Hochberg 校正（错误发现率 5%），而且只报告"大到值得一提"的效应。对"每个实体一条时间序列"的表（股票、国家）会改为比较各实体自己的首尾变化，并降低"中国比哈萨克斯坦排放多"这类显而易见结论的排名。
+
+扫描本身的质量用合成数据测（`python eval/insights_benchmark.py --tables 50`）：每张表埋 6 种已知规律，另有 3 个和什么都无关的噪声列；强度 0 表示一张什么规律都没有的表，此时报出的每一条都是误报。
+
+| strength | trend | shift | group_difference | correlation | outliers | concentration | recall | findings / table | false findings | tables with a false finding |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 100% | 100% | 100% | 100% | 100% | 100% | 100% | 6.0 | 0 (0%) | 0/50 |
+| 0.5 | 100% | 100% | 48% | 100% | 100% | 0% | 75% | 4.5 | 0 (0%) | 0/50 |
+| 0.25 | 96% | 70% | 0% | 0% | 100% | 0% | 44% | 2.7 | 0 (0%) | 0/50 |
+| 0 | — | — | — | — | — | — | — | 0.0 | 1 (100%) | 1/50 |
+
+强度 1 时 6 种规律全部找到、噪声列零误报；没有任何规律的表里，50 张中有 1 张报了 1 条（2%）。规律变弱时召回下降，这是"效应足够大才报告"的门槛有意为之：宁可漏掉很小的差异，也不把噪声当发现。
+
+端到端（Agent 是否会用它、结论是否说到点子上）跑 `insights` 题：
+
+```powershell
+.\eval\eval.ps1 new -Only insights -Tag insights
+.\eval\eval.ps1 old -Only insights -Tag insights
+python eval/report.py eval/results/old-insights eval/results/new-insights --labels 改造前 改造后 --out eval/results/compare-insights.md
+```
 
 ## 并行相关的开关和指标
 
@@ -272,7 +350,7 @@ python eval/report.py eval/results/old-usersim eval/results/new-usersim --labels
 
 - **图表规则是改造后才加的**：所以"最终展示图表的错误率"天然对新版本有利。写结论时要说明：这是"用同一套规则检查两个版本的输出"，并附上几张实际的图作为例子。
 - **结论正确率只是关键词匹配**：可能漏判（比如答案写成了别的说法）。可以结合 `--judge` 的分数和 `logs/` 里的原文一起看。
-- **样本量不大**：54 道题、每题 2–3 次，差距在几个百分点以内的指标不要下结论。
+- **样本量不大**：61 道题、每题 2–3 次，差距在几个百分点以内的指标不要下结论。
 
 ## 图表检查规则（折线图线数）
 

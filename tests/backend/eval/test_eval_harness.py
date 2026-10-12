@@ -185,7 +185,7 @@ def test_question_file_is_consistent():
         for key in run_eval.dataset_keys(q):
             assert key in datasets, (q["id"], key)
         if q.get("expect_ask"):
-            assert q["category"] == "clarify"
+            assert q["category"] in ("clarify", "memory")
     for d in datasets.values():
         if "file" in d:
             assert (EVAL_DIR / d["file"]).exists(), d["file"]
@@ -402,7 +402,7 @@ def test_plan_round_metrics():
 
 def test_intent_questions_are_well_formed():
     qs = [q for q in _questions().values() if q.get("intent")]
-    assert len(qs) >= 8 and {q["category"] for q in qs} == {"ambiguous", "clarify"}
+    assert len(qs) >= 8 and {q["category"] for q in qs} == {"ambiguous", "clarify", "memory"}
     for q in qs:
         assert q["intent"]["text"] and (q["intent"].get("mentions_any") or q["intent"].get("answer_number"))
         assert run_eval.answer_ok(q["intent"], q["intent"]["note"]) is True, q["id"]
@@ -415,6 +415,9 @@ def test_user_sim_grades_against_the_intent():
     assert run_eval.grade(q, right)["success"] is True and run_eval.grade(q, right)["intent_ok"] is True
     g = run_eval.grade(q, wrong)
     assert g["intent_ok"] is False and g["success"] is False
+    # a must-clarify question that guessed right without asking still fails
+    guessed = _rec(summary="按回报率，Jurassic Park 最高", user_sim=True, asked=0)
+    assert run_eval.grade(q, guessed)["intent_ok"] is True and run_eval.grade(q, guessed)["success"] is False
     # without --user-sim the intent is ignored (default grading: must ask first)
     assert run_eval.grade(q, _rec(summary="Avatar", asked=0))["intent_ok"] is None
 
@@ -450,3 +453,72 @@ def test_user_sim_metrics_split_by_asking():
     assert report.metrics([_run()])["intent_ok_rate"] is None
     assert report._why(_run(success=False, chart_ok=True, intent_ok=False, asked=0)) == \
         "没有答到用户真正想问的（模拟用户），且没有反问"
+
+
+# ── model routing: per-model tokens, tiers, cost ──
+
+def test_prices_parse_and_cost_counts_cached_input_separately():
+    prices = report.load_prices("big=2/0.5/8; small=0.2,0.05,0.8 ;broken=1/2")
+    assert prices == {"big": (2.0, 0.5, 8.0), "small": (0.2, 0.05, 0.8)}
+    run = _run(by_model={"big": {"calls": 1, "prompt": 1_000_000, "cached": 400_000, "completion": 100_000},
+                         "small": {"calls": 3, "prompt": 2_000_000, "cached": 0, "completion": 0}})
+    assert report.run_cost(run, prices) == pytest.approx(0.6 * 2 + 0.4 * 0.5 + 0.1 * 8 + 2 * 0.2)
+    assert report.run_cost(run, {"big": (1, 1, 1)}) is None          # a model without a price
+    assert report.run_cost(_run(), prices) is None                    # old record: no per-model tokens
+
+
+def test_routing_metrics(monkeypatch):
+    monkeypatch.setenv("EVAL_PRICES", "big=1/1/1")
+    runs = [_run(llm_tiers={"strong": 1, "fast": 3}, escalations=[]),
+            _run(llm_tiers={"strong": 2, "fast": 2}, escalations=["final answer has numbers with no source (9)"]),
+            _run()]
+    m = report.metrics(runs)
+    assert m["strong_call_share"] == pytest.approx(3 / 8) and m["escalated_runs"] == 1
+    assert m["avg_cost"] is None                                      # no per-model tokens recorded
+    assert report.metrics([_run(llm_tiers={"main": 4})])["strong_call_share"] is None
+
+
+def test_report_leaves_out_rows_without_data():
+    text = report.render_single([_run()])
+    assert "子 Agent 失败率" not in text and "模型分工" not in text and "任务成功率" in text
+
+
+def test_fast_model_flag_reaches_the_workers():
+    args = run_eval.parse_args(["--model", "big", "--fast-model", "small", "--api-key", "k"])
+    assert args.fast_model == "small"
+
+
+# ── memory questions: a follow-up in the same user home ──
+
+def test_memory_questions_are_well_formed():
+    qs = [q for q in _questions().values() if q["category"] == "memory"]
+    assert len(qs) >= 4
+    for q in qs:
+        assert q.get("expect_ask") and q["intent"]["text"] and q["followup"]["question"]
+        assert run_eval.answer_ok(q["followup"], q["followup"]["note"]) is True, q["id"]
+
+
+def test_follow_up_must_pass_too():
+    q = _questions()["memory-movie-success"]
+    rec = _rec(summary="按回报率 Jurassic Park 最高", user_sim=True, asked=1, charts_before_ask=0)
+    assert run_eval.grade(q, {**rec, "followup_ok": True})["success"] is True
+    assert run_eval.grade(q, {**rec, "followup_ok": False})["success"] is False
+
+
+def test_memory_metrics():
+    runs = [_run(category="memory", followup_question="q2", definitions_saved=1, followup_asked=0,
+                 followup_ok=True, followup_definitions_applied=True, followup_tokens=20_000, followup_duration_s=6),
+            _run(category="memory", followup_question="q2", definitions_saved=0, followup_asked=1,
+                 followup_ok=True, followup_definitions_applied=False, followup_tokens=60_000, followup_duration_s=20)]
+    m = report.metrics(runs)
+    assert (m["definitions_saved_rate"], m["followup_ask_rate"], m["followup_ok_rate"], m["followup_applied_rate"]) == (0.5, 0.5, 1.0, 0.5)
+    assert m["avg_followup_tokens"] == 40_000
+    assert report.metrics([_run()])["followup_ask_rate"] is None
+
+
+def test_insight_scan_output_counts_as_evidence():
+    events = [{"type": "tool_result", "tool": "find_insights", "status": "ok",
+               "stdout": "1. [trend] ... Kendall tau = 0.96. (p<0.001, q=1.4e-18)"}]
+    ev = run_eval.collect_evidence(events)
+    result = run_eval.check_numbers("可再生能源持续上升（Kendall τ=0.96）。", ev, [], [])
+    assert result["unsupported"] == 0

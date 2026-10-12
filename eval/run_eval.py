@@ -44,8 +44,9 @@ import tempfile
 import time
 import traceback
 import zipfile
+from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 EVAL_DIR = Path(__file__).resolve().parent
 ROOT = EVAL_DIR.parent
@@ -110,6 +111,7 @@ class UsageMeter:
         self.llm_seconds = 0.0
         self.cached_tokens = 0          # prompt tokens the provider served from its prefix cache
         self.cache_reported_calls = 0   # calls whose usage said anything about caching
+        self.by_model: dict[str, dict[str, int]] = {}   # model -> calls / prompt / cached / completion
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -121,6 +123,7 @@ class UsageMeter:
             "cache_reported_calls": self.cache_reported_calls,
             "estimated_calls": self.estimated_calls,
             "llm_seconds": round(self.llm_seconds, 2),
+            "by_model": {k: dict(v) for k, v in self.by_model.items()},
         }
 
     def total(self) -> int:
@@ -191,6 +194,12 @@ def install_usage_meter() -> None:
         if numbers[2] is not None:
             METER.cached_tokens += numbers[2]
             METER.cache_reported_calls += 1
+        name = str(model).split("/", 1)[-1] if str(model).startswith(("openai/", "anthropic/", "gemini/", "ollama/")) else str(model)
+        slot = METER.by_model.setdefault(name, {"calls": 0, "prompt": 0, "cached": 0, "completion": 0})
+        slot["calls"] += 1
+        slot["prompt"] += numbers[0]
+        slot["cached"] += numbers[2] or 0
+        slot["completion"] += numbers[1]
 
     def _metered_stream(stream: Any, model: str, messages: Any, t0: float):
         usage, parts = None, []
@@ -326,7 +335,8 @@ def table_numbers(frames: list[Any]) -> tuple[list[float], list[float]]:
 def collect_evidence(events: list[dict[str, Any]]) -> dict[str, list[str]]:
     """What the run produced: printed tool output and the data behind each chart."""
     printed = [str(e.get("stdout") or "") for e in events
-               if e.get("type") == "tool_result" and e.get("tool") in ("execute_python_script", "inspect_source_data")]
+               if e.get("type") == "tool_result"
+               and e.get("tool") in ("execute_python_script", "inspect_source_data", "find_insights")]
     charts = []
     for e in events:
         if e.get("type") == "result" and e.get("status") == "success":
@@ -528,11 +538,15 @@ def grade(q: dict[str, Any], rec: dict[str, Any]) -> dict[str, Any]:
         # every number in the answer must come from the run (or the data)
         grounded = unsupported <= int(limit)
     if intent_ok is not None:
-        # what counts is meeting the user's goal, whether or not the agent asked
-        success = bool(rec.get("completed")) and intent_ok is True
+        # what counts is meeting the user's goal; questions that must be
+        # clarified first still have to ask before charting
+        success = bool(rec.get("completed")) and intent_ok is True and clarified is not False
+        if rec.get("followup_ok") is not None:
+            success = success and rec["followup_ok"] is True
     else:
         success = (bool(rec.get("completed")) and bool(rec.get("chart_ok", True))
                    and answer is not False and clarified is not False and grounded is not False)
+        success = success and rec.get("followup_ok") is not False
     return {"mentions_ok": answer, "clarified_first": clarified, "grounded": grounded,
             "intent_ok": intent_ok, "success": success}
 
@@ -556,6 +570,10 @@ def run_question(q: dict[str, Any], datasets: list[dict[str, Any]], args: argpar
                                args.api_version or None)
 
     tmp = Path(tempfile.mkdtemp(prefix="alidade-eval-"))
+    # per-user files (saved definitions, run traces, knowledge rules) go to a
+    # fresh home, not the real ~/.alidade — the eval must not read or leave state
+    os.environ["ALIDADE_HOME"] = str(tmp / "home")
+    os.environ["DATA_FORMULATOR_HOME"] = str(tmp / "home")   # the legacy engine's name for it
     workspace = ws_mod.Workspace("eval-user", root_dir=tmp / "ws")
     frames = []
     for ds in datasets:
@@ -569,13 +587,13 @@ def run_question(q: dict[str, Any], datasets: list[dict[str, Any]], args: argpar
         base_kwargs["checkpoint_db_path"] = tmp / "checkpoints.sqlite"
 
     METER.reset()
-    events: list[dict[str, Any]] = []
-    asks: list[dict[str, Any]] = []
-    tokens_before_ask = None   # spent before the user had any say in the direction
-    kwargs = {**base_kwargs, "user_question": q["question"]}
-    t0 = time.time()
-    error = None
-    try:
+    intent_text = (q.get("intent") or {}).get("text") if args.user_sim else None
+
+    def converse(question: str, events: list, asks: list) -> int | None:
+        """One user question, answering the agent's questions until it finishes.
+        Returns the tokens spent before the agent first asked (None if it never did)."""
+        tokens_before_ask = None   # spent before the user had any say in the direction
+        kwargs = {**base_kwargs, "user_question": question}
         while True:
             agent = make_agent(pkg, client, workspace, args)  # a fresh request per turn
             last = None
@@ -587,10 +605,10 @@ def run_question(q: dict[str, Any], datasets: list[dict[str, Any]], args: argpar
             if last and last.get("type") == "interact" and tokens_before_ask is None:
                 tokens_before_ask = METER.total()
             if not last or last.get("type") != "interact" or len(asks) >= args.max_answers:
-                break
+                return tokens_before_ask
             answer, has_options = answer_for(last)
-            if args.user_sim and q.get("intent"):
-                answer = simulate_user(client, q["intent"]["text"], last)
+            if intent_text:
+                answer = simulate_user(client, intent_text, last)
             asks.append({"questions": [x.get("text") for x in last.get("questions") or []],
                          "has_options": has_options, "context": bool(last.get("context")),
                          "answer": answer})
@@ -601,13 +619,22 @@ def run_question(q: dict[str, Any], datasets: list[dict[str, Any]], args: argpar
                           "trajectory": list(last["trajectory"]) + [{"role": "user", "content": answer}],
                           "completed_step_count": last.get("completed_step_count", 0)}
             else:
-                break
+                return tokens_before_ask
+
+    events: list[dict[str, Any]] = []
+    asks: list[dict[str, Any]] = []
+    tokens_before_ask = None
+    t0 = time.time()
+    error = None
+    try:
+        tokens_before_ask = converse(q["question"], events, asks)
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         traceback.print_exc()
     duration = time.time() - t0
     usage = METER.to_dict()
     usage["tokens_before_ask"] = tokens_before_ask
+    followup = run_followup(q, converse, error) if q.get("followup") else None
 
     record = score(q, events, asks, usage, duration, error, client, args)
     try:
@@ -621,8 +648,56 @@ def run_question(q: dict[str, Any], datasets: list[dict[str, Any]], args: argpar
     except Exception as exc:  # noqa: BLE001 — measurement must never fail a run
         record["number_check"] = {"error": f"{type(exc).__name__}: {exc}"[:300]}
     record.pop("summary_full", None)
+    if followup is not None:
+        record.update(followup)
     record.update(grade(q, record))
     return record
+
+
+def tier_tokens(events: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """Calls and tokens per routing tier, from the run's ``llm_call`` events."""
+    out: dict[str, dict[str, int]] = {}
+    for e in events:
+        if e.get("type") != "llm_call":
+            continue
+        slot = out.setdefault(str(e.get("tier") or "main"), {"calls": 0, "prompt": 0, "cached": 0, "completion": 0})
+        slot["calls"] += 1
+        slot["prompt"] += int(e.get("prompt_tokens") or 0)
+        slot["cached"] += int(e.get("cached_tokens") or 0)
+        slot["completion"] += int(e.get("completion_tokens") or 0)
+    return out
+
+
+def run_followup(q: dict[str, Any], converse: Callable, error: str | None) -> dict[str, Any]:
+    """A second question in the same workspace and user home, after the first
+    finished: does the agent remember what the user meant (``memory`` questions)?"""
+    fu = q["followup"]
+    if error:
+        return {"followup_ok": False, "followup_error": "first question failed"}
+    events: list[dict[str, Any]] = []
+    asks: list[dict[str, Any]] = []
+    tokens0, calls0, t0 = METER.total(), METER.calls, time.time()
+    try:
+        converse(fu["question"], events, asks)
+    except Exception as exc:  # noqa: BLE001
+        traceback.print_exc()
+        return {"followup_ok": False, "followup_error": f"{type(exc).__name__}: {exc}"[:300]}
+    completion = next((e for e in reversed(events) if e.get("type") == "completion"), None)
+    summary = ((completion or {}).get("content") or {}).get("summary") or ""
+    titles = [((e.get("content") or {}).get("result") or {}).get("refined_goal", {}).get("title") or ""
+              for e in events if e.get("type") == "result" and e.get("status") == "success"]
+    return {
+        "followup_question": fu["question"],
+        "followup_asked": len(asks),
+        "followup_asks": asks,
+        "followup_tokens": METER.total() - tokens0,
+        "followup_llm_calls": METER.calls - calls0,
+        "followup_duration_s": round(time.time() - t0, 1),
+        "followup_definitions_applied": any(e.get("type") == "definitions_applied" for e in events),
+        "followup_summary": summary[:2000],
+        "followup_ok": bool(completion) and completion.get("status") == "success"
+                       and answer_ok(fu, "\n".join([summary, *titles])) is not False,
+    }
 
 
 def plan_parallel_width(events: list[dict[str, Any]]) -> int:
@@ -697,6 +772,12 @@ def score(q, events, asks, usage, duration, error, client, args) -> dict[str, An
         "expect_ask": bool(q.get("expect_ask")), "clarified_first": graded["clarified_first"],
         "user_sim": user_sim, "intent_ok": graded["intent_ok"],
         "subagents": subagents,
+        "llm_tiers": dict(Counter(e.get("tier") for e in events if e.get("type") == "llm_call")),
+        "by_tier": tier_tokens(events),
+        "definitions_saved": sum(1 for e in events if e.get("type") == "tool_result"
+                                 and e.get("tool") == "save_definition" and e.get("status") == "ok"),
+        "escalations": [e.get("reason") for e in events if e.get("type") == "llm_call"
+                        and str(e.get("reason") or "").startswith(("final answer", "empty final answer"))],
         "compressions": [{k: c.get(k) for k in ("tokens_before", "tokens_after", "budget", "mode")} for c in compress],
         "summary": summary[:2000],
         "summary_full": summary,
@@ -793,6 +874,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--user-sim", action="store_true",
                    help="questions with an `intent`: an LLM plays the user (answers ask_user from the hidden "
                         "goal) and the answer is graded against that goal")
+    p.add_argument("--strong-effort", default=os.environ.get("EVAL_STRONG_EFFORT", ""),
+                   help="model routing by reasoning effort: effort for the strong tier (e.g. high; "
+                        "sets ALIDADE_STRONG_EFFORT)")
+    p.add_argument("--fast-effort", default=os.environ.get("EVAL_FAST_EFFORT", ""),
+                   help="effort for routine steps (e.g. low; sets ALIDADE_FAST_EFFORT)")
+    p.add_argument("--fast-model", default=os.environ.get("EVAL_FAST_MODEL", ""),
+                   help="model routing: a cheaper model of the same provider for routine steps "
+                        "(sets ALIDADE_FAST_MODEL; the --model is the strong one)")
     p.add_argument("--out", default="")
     p.add_argument("--worker", default="", help=argparse.SUPPRESS)
     p.add_argument("--worker-out", default="", help=argparse.SUPPRESS)
@@ -860,6 +949,12 @@ def main(argv: list[str] | None = None) -> int:
     env["PYTHONIOENCODING"] = "utf-8"
     if args.api_key:
         env["EVAL_API_KEY"] = args.api_key  # passed to workers via env, never on the command line
+    if args.fast_model:
+        env["ALIDADE_FAST_MODEL"] = args.fast_model
+    if args.strong_effort:
+        env["ALIDADE_STRONG_EFFORT"] = args.strong_effort
+    if args.fast_effort:
+        env["ALIDADE_FAST_EFFORT"] = args.fast_effort
 
     sys.path.insert(0, str(EVAL_DIR))
     report = importlib.import_module("report")

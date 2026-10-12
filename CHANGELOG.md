@@ -33,6 +33,10 @@ is kept in [docs/upstream/CHANGELOG.md](docs/upstream/CHANGELOG.md).
 - Number provenance check (`analyst/engine/number_check.py`): every number in a conclusion is traced to the run's printed output, chart data, input tables or simple derived values; the evaluation reports how many cannot be traced, with grounding questions that invite made-up numbers. Measurement only for now.
 - Simulated user (`--user-sim`): clarification questions carry a hidden intent; the model plays the user when the agent asks, and the run is graded on whether the conclusion matches what the user actually wanted, split by "asked first" vs "guessed".
 - Three-step questions (`planned`) to measure plan auto-advance.
+- Model routing in the eval (`--fast-model` / `-FastModel`): tokens per model, strong-model share, answers redone by the strong model, and an estimated cost from `EVAL_PRICES`.
+- Memory questions (`memory`): a vague question, then a follow-up with the same word in the same user home — does the agent ask again?
+- Insight questions (`insights`) and `eval/insights_benchmark.py`: recall and false findings of the insight scan on synthetic tables with planted patterns.
+- Each eval question runs with its own `ALIDADE_HOME`, so the user's real rules, definitions and traces never leak into a run.
 - Multi-angle questions (two independent analyses in one request) with duration, LLM-call and parallel-plan metrics.
 - Harder questions: dirty data (string amounts, mixed date formats, duplicates), multi-table joins, and questions that must be clarified first; numeric and multi-part answer checks.
 
