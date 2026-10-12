@@ -37,6 +37,8 @@ from alidade.agents.client_utils import Client
 from alidade.analyst.engine import checkpoints
 from alidade.analyst.engine import chart_check
 from alidade.analyst.engine import routing
+from alidade.knowledge import definitions
+from alidade.knowledge.definitions import DefinitionStore
 from alidade.analyst.engine.execution import CodeExecutor
 from alidade.analyst.engine.graph import RECURSION_LIMIT, AnalystGraph
 from alidade.analyst.engine.trace import RunTrace
@@ -123,8 +125,11 @@ class AnalystAgent:
         self._knowledge_store = None
         self._injected_knowledge: list[dict[str, Any]] = []
         self._injected_rules: list[str] = []
+        self._definitions: DefinitionStore | None = None
+        self._applied_definitions: list[dict[str, Any]] = []
         user_home = getattr(workspace, "user_home", None)
         if user_home:
+            self._definitions = DefinitionStore(user_home)
             try:
                 from alidade.knowledge.store import KnowledgeStore
                 self._knowledge_store = KnowledgeStore(user_home)
@@ -297,11 +302,34 @@ class AnalystAgent:
     def _current_tools(self, loaded: set[str]) -> list[dict[str, Any]]:
         """Inspection tools (core + load_skill + loaded skills' tools) plus the
         action tools of loaded skills."""
+        extra: list[dict[str, Any]] = []
+        if self._definitions is not None and definitions.definitions_enabled():
+            extra.append(definitions.SAVE_TOOL)
         return build_tools(
             self.registry.gated_skill_names(),
-            [*self.registry.tools_for(loaded), plan_tool()],
+            [*self.registry.tools_for(loaded), plan_tool(), *extra],
             action_tools=self.registry.action_tools_for(loaded),
         )
+
+    def save_definition(self, args: dict[str, Any], question: str,
+                        input_tables: list[dict[str, Any]]) -> tuple[str, str]:
+        """The ``save_definition`` tool: (observation, status)."""
+        if self._definitions is None or not definitions.definitions_enabled():
+            return "Saving definitions is not available here; continue.", "error"
+        try:
+            entry = self._definitions.save(
+                args.get("term", ""), args.get("meaning", ""),
+                tables=[t.get("name", "") for t in input_tables or [] if isinstance(t, dict)],
+                aliases=args.get("aliases") if isinstance(args.get("aliases"), list) else None,
+                question=question,
+            )
+        except ValueError as exc:
+            return f"Not saved: {exc}.", "error"
+        except OSError:
+            logger.warning("Could not save a definition", exc_info=True)
+            return "Not saved (storage error); continue.", "error"
+        return (f"Saved: \"{entry['term']}\" = {entry['meaning']}. It will be used next time without asking; "
+                "the user can change it in the knowledge panel."), "ok"
 
     def _loaded_skill_tool_map(self, loaded: set[str]) -> dict[str, Any]:
         mapping: dict[str, Any] = {}
@@ -740,6 +768,17 @@ class AnalystAgent:
                 "your analysis. Only tables materialized by a supported data "
                 "operation become workspace inputs.\n\n"
             )
+
+        self._applied_definitions = []
+        if self._definitions is not None and definitions.definitions_enabled():
+            try:
+                self._applied_definitions = self._definitions.match(
+                    user_question, [t.get("name", "") for t in input_tables if isinstance(t, dict)])
+                if self._applied_definitions:
+                    user_content += definitions.format_block(self._applied_definitions) + "\n\n"
+                    self._definitions.mark_used([d["id"] for d in self._applied_definitions])
+            except OSError:
+                logger.warning("Could not read saved definitions", exc_info=True)
 
         user_content += f"[USER QUESTION]\n\n{user_question}"
 

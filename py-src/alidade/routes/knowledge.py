@@ -390,3 +390,43 @@ def _workflow_filename(title: str) -> str:
         return safe_data_filename(f"{slug}.md")
     except ValueError:
         return "session-workflow.md"
+
+
+# ── saved definitions (what the user means by a vague word) ───────────────
+
+
+def _definitions():
+    from alidade.knowledge.definitions import DefinitionStore
+    return DefinitionStore(get_user_home(get_identity_id()))
+
+
+@knowledge_bp.route("/definitions/list", methods=["POST"])
+def definitions_list():
+    """All saved definitions of the current user, newest first."""
+    items = sorted(_definitions().list(), key=lambda d: d.get("updated_at") or "", reverse=True)
+    return json_ok({"definitions": items})
+
+
+@knowledge_bp.route("/definitions/save", methods=["POST"])
+def definitions_save():
+    """Add or edit a definition: ``{term, meaning, tables?, aliases?}``."""
+    data = request.get_json(silent=True) or {}
+    term = _require_json_field(data, "term")
+    meaning = _require_json_field(data, "meaning")
+    tables = data.get("tables") if isinstance(data.get("tables"), list) else []
+    aliases = data.get("aliases") if isinstance(data.get("aliases"), list) else []
+    try:
+        entry = _definitions().save(term, meaning, tables=[str(t) for t in tables],
+                                    aliases=[str(a) for a in aliases])
+    except ValueError as exc:
+        raise AppError(ErrorCode.INVALID_REQUEST, str(exc))
+    return json_ok({"definition": entry})
+
+
+@knowledge_bp.route("/definitions/delete", methods=["POST"])
+def definitions_delete():
+    data = request.get_json(silent=True) or {}
+    definition_id = _require_json_field(data, "id")
+    if not _definitions().delete(definition_id):
+        raise AppError(ErrorCode.INVALID_REQUEST, "No such definition")
+    return json_ok({"deleted": definition_id})

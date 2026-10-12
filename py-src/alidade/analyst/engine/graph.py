@@ -145,6 +145,13 @@ class AnalystGraph:
             knowledge_rules_injected=agent._injected_rules,
             knowledge_injected=agent._injected_knowledge,
         )
+        if agent._applied_definitions:
+            write({
+                "type": "definitions_applied",
+                "terms": [d["term"] for d in agent._applied_definitions],
+                "definitions": [{k: d.get(k) for k in ("id", "term", "meaning", "tables")}
+                                for d in agent._applied_definitions],
+            })
         if agent._injected_rules or agent._injected_knowledge:
             write({
                 "type": "context_info",
@@ -247,7 +254,7 @@ class AnalystGraph:
                     "tool_rounds": tool_rounds}
 
         return self._commit_action(
-            action_calls, readonly_calls, messages, content, resp, cycles, tool_rounds, write,
+            action_calls, readonly_calls, messages, content, resp, cycles, tool_rounds, write, state,
         )
 
     def _call_model(self, choice: "routing.Choice", messages: list[dict], tools: list[dict],
@@ -276,7 +283,7 @@ class AnalystGraph:
         return resp
 
     def _commit_action(self, action_calls, readonly_calls, messages, content, resp,
-                       cycles, tool_rounds, write) -> dict[str, Any]:
+                       cycles, tool_rounds, write, state=None) -> dict[str, Any]:
         """One action per turn, first-wins: keep the first action, drop the rest
         (and any inspection calls made alongside it), and tell the model so."""
         rlog = self.agent._reasoning_log
@@ -285,8 +292,11 @@ class AnalystGraph:
         # A plan change may ride along with the action (it commits nothing the
         # user has to wait for); any other inspection call next to an action
         # is dropped, since the action could not have used its result.
+        # Saving a definition the user just settled may ride along too.
         plan_calls = [tc for tc in readonly_calls if tc["function"]["name"] == "update_plan"]
-        readonly_calls = [tc for tc in readonly_calls if tc["function"]["name"] != "update_plan"]
+        save_calls = [tc for tc in readonly_calls if tc["function"]["name"] == "save_definition"]
+        readonly_calls = [tc for tc in readonly_calls
+                          if tc["function"]["name"] not in ("update_plan", "save_definition")]
         dropped_actions = [tc["function"]["name"] for tc in action_calls[1:]]
         dropped_readonly = [tc["function"]["name"] for tc in readonly_calls]
 
@@ -299,7 +309,7 @@ class AnalystGraph:
         llm.rescue_unpack_json_strings(args)
         args["action"] = name
 
-        messages.append(llm.assistant_message(content, [*plan_calls, chosen], resp.reasoning_content))
+        messages.append(llm.assistant_message(content, [*plan_calls, *save_calls, chosen], resp.reasoning_content))
         new_plan = None
         for tc in plan_calls:
             try:
@@ -313,6 +323,18 @@ class AnalystGraph:
             write({"type": "tool_result", "tool": "update_plan", "status": "ok", "stdout": summary})
             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": summary})
         plan_update = {} if new_plan is None else {"plan": new_plan}
+        for tc in save_calls:
+            try:
+                save_args = json.loads(tc["function"]["arguments"] or "{}")
+            except json.JSONDecodeError:
+                save_args = {}
+            save_args = save_args if isinstance(save_args, dict) else {}
+            write({"type": "tool_start", "tool": "save_definition", "term": save_args.get("term")})
+            text_, status_ = self.agent.save_definition(
+                save_args, (state or {}).get("user_question", ""), (state or {}).get("input_tables") or [])
+            write({"type": "tool_result", "tool": "save_definition", "status": status_, "stdout": text_,
+                   "term": save_args.get("term"), "meaning": save_args.get("meaning")})
+            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": text_})
 
         missing = [f for f in self.registry.action_required_fields(name) if not args.get(f)]
         if missing:
@@ -425,6 +447,7 @@ class AnalystGraph:
                 "code": tool_args.get("code") if tool_name == "execute_python_script" else None,
                 "table_names": tool_args.get("table_names") if tool_name == "inspect_source_data" else None,
                 "skill": tool_args.get("name") if tool_name == "load_skill" else None,
+                "term": tool_args.get("term") if tool_name == "save_definition" else None,
             })
             t0 = time.time()
             status = "ok"
@@ -443,6 +466,11 @@ class AnalystGraph:
                 tool_content = planning.summarize_plan(plan)
                 write({"type": "plan", "steps": [dict(x) for x in plan]})
                 write({"type": "tool_result", "tool": tool_name, "status": "ok", "stdout": tool_content})
+            elif tool_name == "save_definition":
+                tool_content, status = agent.save_definition(
+                    tool_args, state.get("user_question", ""), input_tables)
+                write({"type": "tool_result", "tool": tool_name, "status": status, "stdout": tool_content,
+                       "term": tool_args.get("term"), "meaning": tool_args.get("meaning")})
             elif tool_name == "inspect_source_data":
                 tool_content = handle_inspect_source_data(
                     tool_args.get("table_names", []), input_tables, agent.workspace,

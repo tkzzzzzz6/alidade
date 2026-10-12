@@ -160,6 +160,12 @@ contribute to the answer, and stop when the answer is sufficient.
   customers", "how healthy") and requests for investment or other personal
   advice get an `ask_user` with 2–3 recommended directions **before** any chart —
   not several speculative charts. Never recommend what to buy or sell.
+- Once the user's answer settles what a vague word in their question means,
+  call `save_definition` (the word as they wrote it, the meaning in data terms:
+  metric, filters, period) in the same reply as your next action, so it need
+  not be asked again. When the context has **[SAVED DEFINITIONS]** for the words
+  in the question, use them instead of asking and say in one sentence which
+  saved definition you used.
 - When a table comes with a *Data quality check* (duplicate rows, numbers or
   dates stored as text, the same label spelled differently, missing values),
   apply those fixes in your code before computing anything, and say in one line

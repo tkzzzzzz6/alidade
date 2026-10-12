@@ -51,6 +51,7 @@ import { borderColor, radius } from '../app/tokens';
 import { dfActions, dfSelectors, type AlidadeState } from '../app/dfSlice';
 import { isLeafDerivedTable, buildLeafEvents } from './workflowContext';
 import { SessionDistillDialog, findSessionWorkflow } from './SessionDistill';
+import { SavedDefinitionsSection } from './SavedDefinitionsSection';
 import { iconVar, textVar } from '../app/layout';
 
 // Default file name and seed body for a brand-new rule. Rules are plain
@@ -485,6 +486,7 @@ export const KnowledgePanel: React.FC = () => {
                 <Box>
                     {renderCategorySection('rules', t('knowledge.rules'), t('knowledge.rulesHint'))}
                     {renderCategorySection('workflows', t('knowledge.workflows'), t('knowledge.workflowsHint'))}
+                    <SavedDefinitionsSection />
                     <Box sx={{ pb: 1, borderBottom: '1px solid rgba(0, 0, 0, 0.07)' }}>
                         <Box sx={{ display: 'flex', alignItems: 'center', px: 1.5, pt: 1.25, pb: 0.75, backgroundColor: 'rgba(255, 255, 255, 0.46)' }}>
                             <Typography sx={{ fontSize: textVar.xs, fontWeight: 700, color: 'rgba(0, 0, 0, 0.72)', letterSpacing: 0.6, textTransform: 'uppercase' }}>

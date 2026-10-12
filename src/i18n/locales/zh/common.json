@@ -419,6 +419,8 @@
     "close": "关闭画布"
   },
   "dataThread": {
+    "savingDefinition": "记住口径：{{term}}",
+    "definitionsApplied": "沿用已保存的口径：{{items}}",
     "title": "数据线程",
     "refreshNow": "立即刷新",
     "watchForUpdates": "监听更新",
@@ -925,6 +927,15 @@
     "timeDays": "{{count}}天"
   },
   "knowledge": {
+    "definitions": "已保存的口径",
+    "definitionsRefresh": "刷新",
+    "definitionsHint": "Agent 反问时你确定的词义（比如“最好”按什么算）。之后在同样的表上用到同一个词，会直接沿用，不再反问。删掉某条后会重新问你。",
+    "definitionsEmpty": "还没有保存的口径。",
+    "definitionTables": "表：{{tables}}",
+    "definitionAllTables": "所有表",
+    "definitionAliases": "也叫：{{aliases}}",
+    "definitionUses": "已使用 {{count}} 次",
+    "definitionDelete": "删除",
     "title": "Agent 知识",
     "rules": "规则",
     "workflows": "工作流",

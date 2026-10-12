@@ -419,6 +419,8 @@
     "close": "Close canvas"
   },
   "dataThread": {
+    "savingDefinition": "Remembering what “{{term}}” means",
+    "definitionsApplied": "Using saved definitions: {{items}}",
     "title": "Data Threads",
     "refreshNow": "Refresh now",
     "watchForUpdates": "Watch for updates",
@@ -925,6 +927,15 @@
     "timeDays": "{{count}}d"
   },
   "knowledge": {
+    "definitions": "Saved definitions",
+    "definitionsRefresh": "Refresh",
+    "definitionsHint": "What you meant by a vague word, settled when the agent asked you. Later questions using the same word on the same tables use it instead of asking again. Delete one to be asked again.",
+    "definitionsEmpty": "Nothing saved yet.",
+    "definitionTables": "tables: {{tables}}",
+    "definitionAllTables": "all tables",
+    "definitionAliases": "also: {{aliases}}",
+    "definitionUses": "used {{count}}×",
+    "definitionDelete": "Delete",
     "title": "Agent Knowledge",
     "rules": "Rules",
     "workflows": "Workflows",

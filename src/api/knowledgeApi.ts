@@ -189,3 +189,44 @@ export async function distillSessionWorkflow(
     });
     return { path: data.path, category: data.category };
 }
+
+// ── Saved definitions (what the user means by a vague word) ──────────────
+
+export interface SavedDefinition {
+    id: string;
+    term: string;
+    meaning: string;
+    aliases?: string[];
+    tables?: string[];
+    question?: string;
+    created_at?: string;
+    updated_at?: string;
+    uses?: number;
+    last_used_at?: string | null;
+}
+
+export async function listDefinitions(): Promise<SavedDefinition[]> {
+    const { data } = await apiRequest<{ definitions?: SavedDefinition[] }>('/api/knowledge/definitions/list', {
+        method: 'POST',
+        headers: JSON_HEADERS,
+        body: '{}',
+    });
+    return data.definitions ?? [];
+}
+
+export async function saveDefinition(def: Pick<SavedDefinition, 'term' | 'meaning' | 'tables' | 'aliases'>): Promise<SavedDefinition> {
+    const { data } = await apiRequest<{ definition: SavedDefinition }>('/api/knowledge/definitions/save', {
+        method: 'POST',
+        headers: JSON_HEADERS,
+        body: JSON.stringify(def),
+    });
+    return data.definition;
+}
+
+export async function deleteDefinition(id: string): Promise<void> {
+    await apiRequest('/api/knowledge/definitions/delete', {
+        method: 'POST',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ id }),
+    });
+}

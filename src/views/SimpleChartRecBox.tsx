@@ -1175,6 +1175,15 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
                 pushAgentPlan();
             }
 
+            // ── definitions_applied: saved meanings of vague words were used ──
+            if (result.type === "definitions_applied" && Array.isArray(result.definitions) && result.definitions.length > 0) {
+                const items = result.definitions.map((d: any) => `${d.term} = ${d.meaning}`).join('；');
+                thinkingSteps.push('📋 ' + t('dataThread.definitionsApplied', { items }));
+                if (currentDraftId) {
+                    dispatch(dfActions.updateDraftRunningPlan({ draftId: currentDraftId, plan: thinkingSteps.join(STEP_SEP) }));
+                }
+            }
+
             // ── subagent: a plan step was handed to (or came back from) a sub-agent ──
             if (result.type === "subagent" && result.step_id) {
                 const label = stepLabelOf(result.step_id) || String(result.step_id);
@@ -1258,6 +1267,8 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
                 } else if (result.tool === "search_data_tables" || result.tool === "search_knowledge") {
                     const query = result.query || '';
                     pushTool(t('dataThread.searching') + (query ? ` "${query}"` : ''));
+                } else if (result.tool === "save_definition") {
+                    pushTool(t('dataThread.savingDefinition', { term: result.term || '' }));
                 } else if (["visualize", "clarify", "present", "action"].includes(result.tool)) {
                     pushTool(t('dataThread.producingAction', { action: result.tool }));
                 }
