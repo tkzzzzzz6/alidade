@@ -300,12 +300,14 @@ class AnalystGraph:
         dropped_actions = [tc["function"]["name"] for tc in action_calls[1:]]
         dropped_readonly = [tc["function"]["name"] for tc in readonly_calls]
 
+        raw_args = chosen["function"]["arguments"] or "{}"
+        bad_json = False
         try:
-            args = json.loads(chosen["function"]["arguments"] or "{}")
+            args = json.loads(raw_args)
         except json.JSONDecodeError:
-            args = {}
+            args, bad_json = {}, True
         if not isinstance(args, dict):
-            args = {}
+            args, bad_json = {}, True
         llm.rescue_unpack_json_strings(args)
         args["action"] = name
 
@@ -342,6 +344,12 @@ class AnalystGraph:
                 f"The '{name}' action is missing required field(s): {', '.join(missing)}. "
                 "Call it again with those fields filled in."
             )
+            if bad_json:
+                shown = raw_args if len(raw_args) <= 300 else raw_args[:300] + "…"
+                correction = (
+                    f"The '{name}' arguments were not a valid JSON object, so nothing could be read "
+                    f"(received: {shown}). Call it again with a complete JSON object."
+                )
             messages.append({"role": "tool", "tool_call_id": chosen["id"], "content": f"ERROR: {correction}"})
             rlog.log("tool_execution", iteration=cycles + 1, tool=name,
                      input_summary="action_missing_fields", output_summary=", ".join(missing),

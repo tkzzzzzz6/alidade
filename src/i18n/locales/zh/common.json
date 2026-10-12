@@ -1096,6 +1096,7 @@
       "subStarted": "子 Agent 开始：{{title}}",
       "subEnded": "子 Agent {{status}}（{{charts}} 张图）",
       "dropped": "和 {{kept}} 一起被丢弃的调用：{{dropped}}",
+      "rejected": "{{action}} 被退回：{{message}}",
       "compressed": "压缩了较早的步骤",
       "contextInfo": "加载了规则 / 已保存的知识",
       "definitions": "沿用已保存的口径：{{terms}}",

@@ -470,6 +470,7 @@ class AnalystAgent:
         return self._route_skill_events(
             skill.handle_action(action_type, action, ctx),
             iteration, completed_steps, suppress_channel, write, run_id,
+            action_type=action_type,
         )
 
     @staticmethod
@@ -480,14 +481,18 @@ class AnalystAgent:
         suppress_channel: str | None,
         write: Callable[[dict[str, Any]], None],
         run_id: str,
+        action_type: str = "",
     ) -> str | None:
         """Forward a skill's events to the client and return its observation.
 
         * stamps ``iteration`` on every event;
         * records each ``result`` as a completed visualization step;
         * stamps ``run_id`` on ``interact`` (the client resumes with it);
-        * drops ``error`` events — they are recoverable, and the matching
-          observation already tells the model what went wrong;
+        * turns ``error`` events into ``action_rejected`` — they are
+          recoverable and the matching observation already tells the model
+          what went wrong, so the chat does not show them, but the run trace
+          keeps them (otherwise a model stuck retrying a rejected call leaves
+          no record of why);
         * drops the buffered re-emission of content that was already streamed
           live (the ``action`` event and its channel's ``text_delta``).
         """
@@ -500,6 +505,12 @@ class AnalystAgent:
                     etype == "action"
                     or (etype == "text_delta" and ev.get("channel") == suppress_channel)
                 ))
+                if etype == "error":
+                    write({k: v for k, v in {
+                        "type": "action_rejected", "action": action_type, "iteration": ev.get("iteration"),
+                        "message": ev.get("message"), "detail": ev.get("detail"),
+                        "message_code": ev.get("message_code"),
+                    }.items() if v not in (None, "")})
                 if not drop:
                     if etype == "result":
                         content = ev.get("content", {}) or {}

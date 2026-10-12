@@ -1096,6 +1096,7 @@
       "subStarted": "sub-agent started: {{title}}",
       "subEnded": "sub-agent {{status}} ({{charts}} charts)",
       "dropped": "dropped calls next to {{kept}}: {{dropped}}",
+      "rejected": "{{action}} rejected: {{message}}",
       "compressed": "condensed earlier steps",
       "contextInfo": "loaded rules / saved knowledge",
       "definitions": "used saved definitions: {{terms}}",

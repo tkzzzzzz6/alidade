@@ -66,4 +66,13 @@ describe('traceTimeline', () => {
         expect(reasonLabel('something new', defaultLabeler)).toBe('something new');
         expect(reasonLabel(undefined, defaultLabeler)).toBe('');
     });
+
+    it('shows a rejected action as an error mark', () => {
+        const [span] = buildSpans([ev(700, 'action_rejected', {
+            action: 'ask_user', message: 'ask_user question had no options; asking the model to retry.',
+            detail: '[ERROR] ...',
+        })]);
+        expect(span).toMatchObject({ kind: 'mark', tone: 'error', start: 700 });
+        expect(span.label).toBe('ask_user rejected: ask_user question had no options; asking the model to retry.');
+    });
 });

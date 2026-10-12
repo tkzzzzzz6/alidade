@@ -129,7 +129,8 @@ def summarize(segments: list[dict[str, Any]]) -> dict[str, Any]:
         "chart_checks": sum(1 for e in events if e.get("type") == "chart_check" and e.get("status") == "retrying"),
         "subagents": sum(1 for e in events if e.get("type") == "subagent" and e.get("status") == "started"),
         "asks": sum(1 for e in events if e.get("type") == "interact"),
-        "errors": sum(1 for e in events if e.get("type") == "error"),
+        "errors": sum(1 for e in events if e.get("type") in ("error", "action_rejected")
+                      or (e.get("type") == "tool_result" and e.get("status") == "error")),
     }
 
 

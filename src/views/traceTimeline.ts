@@ -103,6 +103,7 @@ export const DEFAULT_LABELS: Record<string, string> = {
     subStarted: 'sub-agent started: {{title}}',
     subEnded: 'sub-agent {{status}} ({{charts}} charts)',
     dropped: 'dropped calls next to {{kept}}: {{dropped}}',
+    rejected: '{{action}} rejected: {{message}}',
     compressed: 'condensed earlier steps',
     contextInfo: 'loaded rules / saved knowledge',
     definitions: 'used saved definitions: {{terms}}',
@@ -168,6 +169,8 @@ function markOf(e: TraceEvent, tr: Labeler): { label: string; tone: SpanTone } |
                     tone: e.status === 'success' || e.status === 'budget_exhausted' ? 'info' : 'error' };
         case 'calls_dropped':
             return { label: tr('dropped', { kept: e.kept, dropped: (e.dropped || []).join(', ') }), tone: 'info' };
+        case 'action_rejected':
+            return { label: tr('rejected', { action: e.action || 'action', message: e.message || '' }), tone: 'error' };
         case 'context_compressed':
             return { label: tr('compressed'), tone: 'info' };
         case 'context_info':

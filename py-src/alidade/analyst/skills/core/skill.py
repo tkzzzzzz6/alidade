@@ -26,7 +26,9 @@ via ``ctx.runtime``.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Any, Generator
 
 from alidade.agents.agent_utils import generate_data_summary
@@ -201,25 +203,31 @@ class CoreSkill:
         try:
             payload = self._normalize_interact_action(action)
         except ValueError:
-            msg = "ask_user action requires non-empty questions."
+            msg = (
+                "[ERROR] ask_user needs a non-empty `questions` list. Got: "
+                f"{_preview(action.get('questions'))}. " + _ASK_USER_SHAPE
+            )
             yield {
                 "type": "error",
-                "message": msg,
+                "message": "ask_user was called without questions; asking the model to retry.",
+                "detail": msg,
                 "message_code": "agent.parseActionFailed",
             }
             return msg
         # Every question offers clickable directions, the recommended one first;
         # a question without them goes back to the model to fill in.
-        bare = [q.get("text", "") for q in payload["questions"] if len(q.get("options") or []) < 2]
+        bare = [q for q in payload["questions"] if len(q.get("options") or []) < 2]
         if bare:
+            raw = action.get("questions")
             msg = (
-                "ask_user needs 2–3 options for every question so the user can click a "
+                "[ERROR] ask_user needs 2–3 options for every question so the user can click a "
                 "direction: list the one you recommend most FIRST (it is labelled "
                 "'recommended'), then the alternatives. Missing options for: "
-                + "; ".join(f'"{t}"' for t in bare)
-                + ". Call ask_user again with options filled in."
+                + "; ".join(f'"{q.get("text", "")}"' for q in bare)
+                + f". You sent: {_preview(raw)}. " + _ASK_USER_SHAPE
             )
-            yield {"type": "error", "message": msg, "message_code": "agent.parseActionFailed"}
+            yield {"type": "error", "message": "ask_user question had no options; asking the model to retry.",
+                   "detail": msg, "message_code": "agent.parseActionFailed"}
             return msg
         # The model's reply text written alongside the call (what it found,
         # why it is asking) — shown above the question so the user has context.
@@ -274,15 +282,16 @@ class CoreSkill:
 
     @classmethod
     def _sanitize_clarification_options(cls, raw_options: Any) -> list[dict[str, Any]]:
-        if not isinstance(raw_options, list):
-            return []
+        raw_options = _as_list(raw_options, split_text=True)
         options: list[dict[str, Any]] = []
         for raw_option in raw_options[:3]:
+            if isinstance(raw_option, (int, float)) and not isinstance(raw_option, bool):
+                raw_option = str(raw_option)
             if isinstance(raw_option, str):
                 label = raw_option.strip()
                 label_code = ""
             elif isinstance(raw_option, dict):
-                label = str(raw_option.get("label", "")).strip()
+                label = str(_first(raw_option, "label", "text", "value", "option", "title")).strip()
                 label_code = str(raw_option.get("label_code", "")).strip()
             else:
                 continue
@@ -298,13 +307,14 @@ class CoreSkill:
 
     @classmethod
     def _sanitize_clarification_questions(cls, raw_questions: Any) -> list[dict[str, Any]]:
-        if not isinstance(raw_questions, list):
-            return []
+        raw_questions = _as_list(raw_questions)
         questions: list[dict[str, Any]] = []
         for raw_question in raw_questions[:3]:
+            if isinstance(raw_question, str):
+                raw_question = {"text": raw_question}
             if not isinstance(raw_question, dict):
                 continue
-            text = str(raw_question.get("text", "")).strip()
+            text = str(_first(raw_question, "text", "question", "prompt", "title")).strip()
             text_code = str(raw_question.get("text_code", "")).strip()
             if not text and not text_code:
                 continue
@@ -356,6 +366,64 @@ class CoreSkill:
         if not questions:
             raise ValueError("ask_user action requires non-empty questions[]")
         return {"questions": questions}
+
+# ----------------------------------------------------------------------
+# Lenient parsing of ask_user arguments
+# ----------------------------------------------------------------------
+# Models do not always send the schema's exact shape: nested fields arrive as
+# JSON-encoded strings ("options": "[\"A\", \"B\"]"), a single question as an
+# object instead of a list, or "question" / "label"-less option objects. Each
+# of those used to drop the question (or its options) silently, the model was
+# told only "requires non-empty questions", resent the same shape and
+# eventually gave up and asked in plain text.
+
+_ASK_USER_SHAPE = (
+    'Expected shape: {"questions": [{"text": "<question>", "options": '
+    '["<recommended>", "<alternative>"]}]} — `questions` and `options` are JSON '
+    "arrays, not strings. Call ask_user again in that shape."
+)
+_PREVIEW_CHARS = 300
+_OPTION_SPLIT = re.compile(r"\s*(?:\n|\||；|;)\s*")
+
+
+def _preview(value: Any) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = repr(value)
+    return text if len(text) <= _PREVIEW_CHARS else text[:_PREVIEW_CHARS] + "…"
+
+
+def _first(d: dict[str, Any], *keys: str) -> Any:
+    for k in keys:
+        v = d.get(k)
+        if v not in (None, ""):
+            return v
+    return ""
+
+
+def _as_list(value: Any, *, split_text: bool = False) -> list[Any]:
+    """A list from a list, a JSON-encoded list/object, or a single item."""
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped[:1] in ("[", "{"):
+            try:
+                value = json.loads(stripped)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        if isinstance(value, str):
+            if not stripped:
+                return []
+            if split_text:
+                parts = [p for p in _OPTION_SPLIT.split(stripped) if p]
+                return parts
+            return [stripped]
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return value
+    return []
+
 
 def get_skill() -> CoreSkill:
     """Factory used by the registry's eager instantiation."""
