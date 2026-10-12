@@ -3,7 +3,8 @@
 
 import React, { memo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import Markdown from 'react-markdown';
+import Markdown, { defaultUrlTransform } from 'react-markdown';
+import { ChartRefImage, chartRefId } from './ChartRefImage';
 import remarkGfm from 'remark-gfm';
 import { Box, Collapse, Typography, useTheme } from '@mui/material';
 import { alpha } from '@mui/material/styles';
@@ -150,7 +151,15 @@ export const CompactMarkdown: React.FC<{ content: string; color: string }> = ({ 
     }}>
         <Markdown
             remarkPlugins={[remarkGfm]}
+            // keep `chart://<id>` (the agent's reference to a chart it drew);
+            // every other URL goes through the default sanitising
+            urlTransform={url => (chartRefId(url) ? url : defaultUrlTransform(url))}
             components={{
+                img: ({ src, alt }) => {
+                    const chartId = chartRefId(typeof src === 'string' ? src : undefined);
+                    if (chartId) return <ChartRefImage chartId={chartId} caption={alt || undefined} />;
+                    return <Box component="img" src={src as string} alt={alt || ''} sx={{ maxWidth: '100%' }} />;
+                },
                 p: ({ children }) => (
                     <Typography component="p" sx={{ fontSize: 'inherit', color, lineHeight: 1.6, my: 0.25 }}>
                         {children}
