@@ -475,6 +475,8 @@ def analyst_streaming():
     resume_run_id = str(content.get("run_id") or "").strip() or None
     conversation_id = str(content.get("conversation_id", "")).strip()
     interaction_response = content.get("interaction_response")
+    from alidade.analyst.engine.run_settings import RunSettings
+    run_settings = RunSettings.from_env().merged(content.get("agent_settings"))
     execution_operation = None
     operation_repository = None
 
@@ -588,6 +590,7 @@ def analyst_streaming():
                 max_iterations=max_iterations,
                 max_repair_attempts=max_repair_attempts,
                 identity_id=identity_id,
+                settings=run_settings,
             )
 
             if resume_run_id:
@@ -620,6 +623,35 @@ def analyst_streaming():
         stream_with_context(_with_warnings(generate())),
         mimetype='application/x-ndjson',
     )
+
+
+@agent_bp.route('/run-settings', methods=['GET'])
+def run_settings_defaults():
+    """Server defaults and allowed ranges for the per-run agent settings."""
+    from alidade.analyst.engine import run_settings
+    return json_ok(run_settings.describe())
+
+
+@agent_bp.route('/subagent-stop', methods=['POST'])
+def subagent_stop():
+    """Stop one running sub-agent: ``{run_id, step_id}``.
+
+    The step ends at its sub-agent's next model turn; the main agent is told
+    the user stopped it and does not redo it. ``stopped`` is false when that
+    step is not running (already finished, or an unknown run).
+    """
+    from alidade.analyst.engine import subagent_control
+
+    identity_id = get_identity_id()
+    if not identity_id:
+        raise AppError(ErrorCode.AUTH_REQUIRED, "Identity ID required")
+    content = request.get_json(silent=True) or {}
+    run_id = str(content.get("run_id") or "").strip()
+    step_id = str(content.get("step_id") or "").strip()
+    if not run_id or not step_id:
+        raise AppError(ErrorCode.INVALID_REQUEST, "run_id and step_id are required")
+    stopped = subagent_control.stop(identity_id, run_id, step_id)
+    return json_ok({"stopped": stopped, "running": subagent_control.running(identity_id, run_id)})
 
 
 @agent_bp.route('/code-expl', methods=['GET', 'POST'])

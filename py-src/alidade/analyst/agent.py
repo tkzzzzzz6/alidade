@@ -34,6 +34,7 @@ from alidade.agents.context import (
     build_peripheral_thread_context,
 )
 from alidade.agents.client_utils import Client
+from alidade.analyst.engine.run_settings import RunSettings
 from alidade.analyst.engine import checkpoints
 from alidade.analyst.engine import chart_check
 from alidade.analyst.engine import insights, routing
@@ -95,8 +96,11 @@ class AnalystAgent:
         max_iterations: int = 5,
         max_repair_attempts: int = 2,
         identity_id: str | None = None,
+        settings: RunSettings | None = None,
     ):
         self.client = client
+        # per-run settings chosen in the UI (or the server defaults)
+        self.settings = settings or RunSettings.from_env()
         # model routing: a cheaper model of the same provider for routine steps
         self.fast_client = _fast_client_for(client)
         # ... and/or a different reasoning effort per tier (same model)
@@ -228,6 +232,10 @@ class AnalystAgent:
                             message_code="agent.runExpired",
                         )
                         return
+                    # keep the settings the run started with
+                    saved = (graph.get_state(config).values or {}).get("run_settings")
+                    if isinstance(saved, dict):
+                        self.settings = RunSettings().merged(saved)
                     self.executor.open(restore=True)
                     graph_input: Any = Command(resume=user_question)
                 else:
@@ -244,11 +252,13 @@ class AnalystAgent:
                         "conversation_id": conversation_id,
                         "charts": list(charts or []),
                         "max_iterations": self.max_iterations,
+                        "run_settings": self.settings.to_dict(),
                     }
 
                 # Keep a reference to the stream: if the client goes away (Stop),
                 # closing it waits for the running node, so tell running
                 # sub-agents to stop first.
+                trace.segment["settings"] = self.settings.to_dict()
                 stream = graph.stream(graph_input, config, stream_mode="custom", durability="exit")
                 try:
                     for event in stream:
@@ -307,7 +317,7 @@ class AnalystAgent:
             extra.append(definitions.SAVE_TOOL)
         return build_tools(
             self.registry.gated_skill_names(),
-            [*self.registry.tools_for(loaded), plan_tool(), *extra],
+            [*self.registry.tools_for(loaded), plan_tool(self.settings.subagents), *extra],
             action_tools=self.registry.action_tools_for(loaded),
         )
 
@@ -705,7 +715,7 @@ class AnalystAgent:
             "{context_guide}": context_guide,
             "{skills_block}": skills_block,
             "{max_iterations}": str(self.max_iterations),
-            "{planning}": planning_prompt(),
+            "{planning}": planning_prompt(self.settings.subagents, self.settings.plan_auto_advance),
             "{agent_exploration_rules}": rules_block,
         }
         prompt = SYSTEM_PROMPT

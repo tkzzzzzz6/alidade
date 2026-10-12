@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -318,7 +319,9 @@ class AnalystGraph:
                 plan_args = json.loads(tc["function"]["arguments"] or "{}")
             except json.JSONDecodeError:
                 plan_args = {}
-            new_plan = planning.normalize_steps((plan_args or {}).get("steps") if isinstance(plan_args, dict) else None)
+            new_plan = planning.keep_subagent_info(
+                planning.normalize_steps((plan_args or {}).get("steps") if isinstance(plan_args, dict) else None),
+                (state or {}).get("plan"))
             summary = planning.summarize_plan(new_plan)
             write({"type": "tool_start", "tool": "update_plan"})
             write({"type": "plan", "steps": new_plan})
@@ -470,7 +473,7 @@ class AnalystGraph:
                 write({"type": "tool_result", "tool": tool_name, "status": status,
                        "stdout": result.get("stdout", ""), "error": result.get("error")})
             elif tool_name == "update_plan":
-                plan = planning.normalize_steps(tool_args.get("steps"))
+                plan = planning.keep_subagent_info(planning.normalize_steps(tool_args.get("steps")), plan)
                 plan_changed = True
                 tool_content = planning.summarize_plan(plan)
                 write({"type": "plan", "steps": [dict(x) for x in plan]})
@@ -553,7 +556,7 @@ class AnalystGraph:
         """Sub-agents are on, and the plan has ≥2 steps that could start now."""
         if getattr(self.agent, "should_stop", None) is not None:
             return False                                   # a sub-agent never fans out again
-        if not planning.subagents_enabled():
+        if not self.agent.settings.subagents:
             return False
         if int(state.get("subagent_rounds") or 0) >= self.MAX_SUBAGENT_ROUNDS:
             return False
@@ -562,21 +565,33 @@ class AnalystGraph:
     def subagents_step(self, state: AnalystState) -> dict[str, Any]:
         """Hand every step that can start now to its own sub-agent, run them in
         parallel (bounded), stream their events tagged with ``step_id``, and
-        report what each found back to the main agent."""
+        report what each found back to the main agent.
+
+        Each step's sub-agent can be stopped on its own from the UI (see
+        :mod:`.subagent_control`); a step the user stopped is marked skipped
+        and the main agent is told not to redo it. What each sub-agent did is
+        recorded on its plan step (``subagent``), so the checklist can show it
+        live and keep the findings after the run.
+        """
         import queue
-        import threading
         from concurrent.futures import ThreadPoolExecutor
 
-        from alidade.analyst.engine import subagent
+        from alidade.analyst.engine import subagent, subagent_control
 
         agent = self.agent
+        settings = agent.settings
         write = _writer()
+        run_id = state.get("run_id", "")
+        identity = getattr(agent, "identity_id", None)
         dispatched = list(state.get("dispatched_steps") or [])
         plan = [dict(s) for s in state.get("plan") or []]
         batch = planning.startable_steps(plan, dispatched)
+        batch_ids = {b["id"] for b in batch}
+        started_ms = int(time.time() * 1000)
         for s in plan:
-            if s["id"] in {b["id"] for b in batch}:
+            if s["id"] in batch_ids:
                 s["status"] = "in_progress"
+                s["subagent"] = {"status": "queued", "run_id": run_id}
         write({"type": "plan", "steps": [dict(x) for x in plan]})
 
         messages = _copy_messages(state.get("messages") or [])
@@ -585,72 +600,104 @@ class AnalystGraph:
             "user_question": state.get("user_question", ""),
             "user_answers": _user_answers(messages),
             "input_tables": state.get("input_tables") or [],
-            "parent_run_id": state.get("run_id", ""),
+            "parent_run_id": run_id,
+            "max_actions": settings.subagent_max_charts,
         } for b in batch]
         events: queue.Queue = queue.Queue()
-        limit = subagent.timeout_s()
-
-        stops: list[threading.Event] = []
+        limit = settings.subagent_timeout_s
+        handles = {t["step_id"]: subagent_control.StepHandle() for t in tasks}
+        for sid, handle in handles.items():
+            subagent_control.register(identity, run_id, sid, handle)
         run_ended = getattr(agent, "run_ended", None)          # the user pressed Stop / went away
 
         def run_one(task: dict[str, Any]) -> dict[str, Any]:
-            stop = threading.Event()
-            stops.append(stop)
+            handle = handles[task["step_id"]]
             if run_ended is not None and run_ended.is_set():
-                stop.set()
-            timer = threading.Timer(limit, stop.set)
+                handle.stop(subagent_control.RUN_ENDED)
+            timer = threading.Timer(limit, handle.stop, args=(subagent_control.TIMEOUT,))
             timer.daemon = True
             events.put({"type": "subagent", "step_id": task["step_id"], "status": "started",
-                        "title": task["title"]})
+                        "title": task["title"], "goal": task["goal"], "run_id": run_id,
+                        "started_at": int(time.time() * 1000), "timeout_s": limit,
+                        "max_charts": task["max_actions"]})
             timer.start()
             try:
-                result = subagent.run_subtask(agent, task, events.put, stop)
+                result = subagent.run_subtask(agent, task, events.put, handle.event)
             finally:
                 timer.cancel()
-            if stop.is_set() and result["status"] == "stopped":
-                result["status"] = "timeout"
+            if handle.stopped and result["status"] == "stopped":
+                result["status"] = {subagent_control.USER: "cancelled",
+                                    subagent_control.TIMEOUT: "timeout"}.get(handle.reason, "stopped")
             return result
 
         results: dict[str, dict[str, Any]] = {}
-        with ThreadPoolExecutor(max_workers=subagent.max_parallel(), thread_name_prefix="subagent") as pool:
-            futures = {pool.submit(run_one, t): t["step_id"] for t in tasks}
-            pending = set(futures)
-            while pending:
-                try:
-                    write(events.get(timeout=0.2))          # forward from this node's thread only
-                except queue.Empty:
-                    pass
-                if run_ended is not None and run_ended.is_set():
-                    for s in stops:
-                        s.set()
-                for f in [f for f in pending if f.done()]:
-                    pending.discard(f)
-                    sid = futures[f]
+        try:
+            with ThreadPoolExecutor(max_workers=settings.max_parallel, thread_name_prefix="subagent") as pool:
+                futures = {pool.submit(run_one, t): t["step_id"] for t in tasks}
+                pending = set(futures)
+                while pending:
                     try:
-                        results[sid] = f.result()
-                    except Exception as exc:  # noqa: BLE001
-                        results[sid] = {"step_id": sid, "status": "failed", "error": str(exc)[:300],
-                                        "findings": "", "charts": [], "chart_titles": [],
-                                        "completed_steps": [], "duration_s": 0.0}
-        while not events.empty():
-            write(events.get_nowait())
+                        ev = events.get(timeout=0.2)            # forward from this node's thread only
+                        write(ev)
+                        if ev.get("type") == "subagent" and ev.get("status") == "started":
+                            for s in plan:
+                                if s["id"] == ev["step_id"]:
+                                    s["subagent"] = {**(s.get("subagent") or {}), "status": "running",
+                                                     "started_at": ev["started_at"], "timeout_s": limit}
+                            # the checklist shows the step as running (with its clock)
+                            write({"type": "plan", "steps": [dict(x) for x in plan]})
+                    except queue.Empty:
+                        pass
+                    if run_ended is not None and run_ended.is_set():
+                        for h in handles.values():
+                            h.stop(subagent_control.RUN_ENDED)
+                    for f in [f for f in pending if f.done()]:
+                        pending.discard(f)
+                        sid = futures[f]
+                        try:
+                            results[sid] = f.result()
+                        except Exception as exc:  # noqa: BLE001
+                            results[sid] = {"step_id": sid, "status": "failed", "error": str(exc)[:300],
+                                            "findings": "", "charts": [], "chart_titles": [],
+                                            "completed_steps": [], "duration_s": 0.0}
+                        subagent_control.unregister(identity, run_id, sid)
+            while not events.empty():
+                write(events.get_nowait())
+        finally:
+            for sid in handles:
+                subagent_control.unregister(identity, run_id, sid)
 
         charts = list(state.get("charts") or [])
         completed_steps = list(state.get("completed_steps") or [])
         sections = []
         for t in tasks:
             r = results[t["step_id"]]
-            write({"type": "subagent", "step_id": t["step_id"], "status": r["status"],
-                   "duration_s": r.get("duration_s"), "charts": len(r.get("chart_titles") or [])})
+            titles = [x for x in r.get("chart_titles") or [] if x]
+            record = {
+                "status": r["status"], "run_id": run_id,
+                "started_at": next((s.get("subagent", {}).get("started_at") for s in plan
+                                    if s["id"] == t["step_id"]), None) or started_ms,
+                "duration_s": r.get("duration_s"), "charts": len(r.get("chart_titles") or []),
+                "chart_titles": titles, "findings": r.get("findings") or "",
+                **({"error": r["error"]} if r.get("error") else {}),
+            }
+            write({"type": "subagent", "step_id": t["step_id"], **record})
             ok = r["status"] in ("success", "budget_exhausted") and r.get("chart_titles")
             for s in plan:
                 if s["id"] == t["step_id"]:
-                    s["status"] = "done" if ok or r["status"] == "success" else "pending"
+                    if r["status"] == "cancelled":
+                        s["status"] = "skipped"
+                    else:
+                        s["status"] = "done" if ok or r["status"] == "success" else "pending"
+                    s["subagent"] = record
             charts.extend(r.get("charts") or [])
             completed_steps.extend(r.get("completed_steps") or [])
-            shown = "; ".join(x for x in r.get("chart_titles") or [] if x) or "none"
+            shown = "; ".join(titles) or "none"
             body = r.get("findings") or "(no findings)"
-            if r["status"] not in ("success", "budget_exhausted"):
+            if r["status"] == "cancelled":
+                body += ("\n(The user stopped this step. Do not redo it; say in the final answer that "
+                         "it was skipped at the user's request.)")
+            elif r["status"] not in ("success", "budget_exhausted"):
                 body += f"\n(This step did not finish: {r['status']}{' — ' + r['error'] if r.get('error') else ''}.)"
             sections.append(f"### {t['step_id']} — {t['title']} [{r['status']}]\nCharts shown: {shown}\n{body}")
         write({"type": "plan", "steps": [dict(x) for x in plan]})
@@ -718,7 +765,7 @@ class AnalystGraph:
         )
         if observation is not None and agent._chart_check_note:
             observation = f"{observation}\n\n{agent._chart_check_note}"
-        if name == "visualize" and len(completed_steps) > charts_before and planning.auto_advance_enabled():
+        if name == "visualize" and len(completed_steps) > charts_before and agent.settings.plan_auto_advance:
             # a chart was shown: advance the plan here instead of spending an
             # LLM round on an update_plan call
             advanced = planning.advance_plan(state.get("plan") or [], (pending.get("args") or {}).get("plan_step"))
@@ -772,7 +819,7 @@ class AnalystGraph:
             ))
             return {}
         closed = (planning.close_plan(state.get("plan") or [])
-                  if status == "success" and planning.auto_advance_enabled() else None)
+                  if status == "success" and self.agent.settings.plan_auto_advance else None)
         if closed is not None:
             write({"type": "plan", "steps": closed})
         content: dict[str, Any] = {

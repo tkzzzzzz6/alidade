@@ -119,7 +119,23 @@
     "localRowLimitHint": "Maximum number of rows kept when loading data locally (not stored on server).",
     "maxStretchFactor": "max chart stretch factor",
     "maxStretchFactorRangeError": "Value must be between 1.0 and 5.0",
-    "maxStretchFactorHint": "How much charts can grow beyond the base size (1.0 = no stretch, 2.0 = up to 2×)."
+    "maxStretchFactorHint": "How much charts can grow beyond the base size (1.0 = no stretch, 2.0 = up to 2×).",
+    "agent": {
+      "title": "Agent",
+      "subagents": "Parallel sub-agents",
+      "subagentsHint": "Independent plan steps are worked on at the same time, each by its own sub-agent. Faster for multi-part questions; uses more tokens.",
+      "maxParallel": "At once",
+      "maxCharts": "Charts each",
+      "timeout": "Time limit",
+      "seconds": "{{n}} s",
+      "autoAdvance": "Advance the plan automatically",
+      "autoAdvanceHint": "Mark a plan step done as soon as its chart is shown, without an extra model call.",
+      "on": "On",
+      "off": "Off",
+      "serverDefault": "Server default",
+      "defaultShort": "{{value}} (default)",
+      "serverDefaultIs": "Server default ({{value}})"
+    }
   },
   "landing": {
     "tagline": "Aim at the question, read the data.",
@@ -525,7 +541,29 @@
     "parallelSteps": "Steps {{steps}} running in parallel",
     "subagentStarted": "{{step}} handed to a sub-agent: {{title}}",
     "subagentDone": "{{step}} finished ({{charts}} charts)",
-    "subagentFailed": "{{step}} did not finish ({{status}})"
+    "subagentFailed": "{{step}} did not finish ({{status}})",
+    "subagentCancelled": "{{step}} stopped by you",
+    "subagentTimeout": "{{step}} ran out of time",
+    "subagentBadge": "Sub-agent",
+    "subagentStopping": "stopping…",
+    "subagentCharts_one": "{{count}} chart",
+    "subagentCharts_other": "{{count}} charts",
+    "subagentStop": "Stop this step (the others keep going)",
+    "subagentStopAria": "Stop sub-agent: {{title}}",
+    "subagentShow": "Findings",
+    "subagentHide": "Hide",
+    "subagentSummary_one": "· {{count}} step in parallel",
+    "subagentSummary_other": "· {{count}} steps in parallel",
+    "subagentStatus": {
+      "queued": "queued",
+      "running": "working",
+      "success": "done",
+      "budget_exhausted": "done",
+      "timeout": "timed out",
+      "cancelled": "stopped by you",
+      "stopped": "stopped",
+      "failed": "failed"
+    }
   },
   "dataLoading": {
     "extractingData": "extracting data...",

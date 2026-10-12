@@ -74,6 +74,8 @@ export function getUrls() {
 
         // Run traces (what each analyst run did)
         TRACES: `/api/traces`,
+        RUN_SETTINGS: `/api/agent/run-settings`,
+        SUBAGENT_STOP: `/api/agent/subagent-stop`,
         MODEL_ENDPOINTS: `/api/model-endpoints`,
 
         // Session management

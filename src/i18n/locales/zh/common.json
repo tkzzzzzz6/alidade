@@ -119,7 +119,23 @@
     "localRowLimitHint": "本地加载数据时保留的最大行数（不存储到服务端）。",
     "maxStretchFactor": "图表最大拉伸系数",
     "maxStretchFactorRangeError": "取值必须在 1.0 到 5.0 之间",
-    "maxStretchFactorHint": "图表可在基础尺寸上放大的倍数（1.0 = 不拉伸，2.0 = 最大 2 倍）。"
+    "maxStretchFactorHint": "图表可在基础尺寸上放大的倍数（1.0 = 不拉伸，2.0 = 最大 2 倍）。",
+    "agent": {
+      "title": "Agent",
+      "subagents": "并行子 Agent",
+      "subagentsHint": "互不依赖的计划步骤同时进行，每步交给一个子 Agent。多部分的问题更快，token 用量会多一些。",
+      "maxParallel": "同时运行",
+      "maxCharts": "每个最多图表",
+      "timeout": "时间上限",
+      "seconds": "{{n}} 秒",
+      "autoAdvance": "计划自动推进",
+      "autoAdvanceHint": "图表一出来就把对应步骤标为完成，不再额外调用一次模型。",
+      "on": "开",
+      "off": "关",
+      "serverDefault": "服务器默认",
+      "defaultShort": "{{value}}（默认）",
+      "serverDefaultIs": "服务器默认（{{value}}）"
+    }
   },
   "landing": {
     "tagline": "瞄准问题，读懂数据。",
@@ -525,7 +541,29 @@
     "parallelSteps": "第 {{steps}} 步同时进行中",
     "subagentStarted": "{{step}}交给子 Agent：{{title}}",
     "subagentDone": "{{step}}完成（{{charts}} 张图）",
-    "subagentFailed": "{{step}}未完成（{{status}}）"
+    "subagentFailed": "{{step}}未完成（{{status}}）",
+    "subagentCancelled": "{{step}}已被你停止",
+    "subagentTimeout": "{{step}}超时",
+    "subagentBadge": "子 Agent",
+    "subagentStopping": "正在停止…",
+    "subagentCharts_one": "{{count}} 张图",
+    "subagentCharts_other": "{{count}} 张图",
+    "subagentStop": "停止这一步（其他步骤继续）",
+    "subagentStopAria": "停止子 Agent：{{title}}",
+    "subagentShow": "查看结论",
+    "subagentHide": "收起",
+    "subagentSummary_one": "· {{count}} 步并行",
+    "subagentSummary_other": "· {{count}} 步并行",
+    "subagentStatus": {
+      "queued": "排队中",
+      "running": "进行中",
+      "success": "完成",
+      "budget_exhausted": "完成",
+      "timeout": "超时",
+      "cancelled": "已被你停止",
+      "stopped": "已停止",
+      "failed": "失败"
+    }
   },
   "dataGrid": {
     "loading": "加载中...",

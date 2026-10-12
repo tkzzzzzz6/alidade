@@ -64,6 +64,7 @@ the whole request.
 
 
 def max_parallel() -> int:
+    """Env default only; a run uses ``agent.settings.max_parallel``."""
     try:
         return max(1, int(os.environ.get("ALIDADE_MAX_SUBAGENTS", DEFAULT_MAX_PARALLEL)))
     except ValueError:
@@ -150,6 +151,7 @@ def run_subtask(
         language_instruction=parent.language_instruction,
         max_actions=int(task.get("max_actions") or DEFAULT_MAX_ACTIONS),
         should_stop=stop.is_set,
+        settings=getattr(parent, "settings", None),
     )
     run_id = f"{task.get('parent_run_id') or 'run'}-{step_id}-{uuid.uuid4().hex[:6]}"
     agent.executor = CodeExecutor(agent.workspace, run_id)

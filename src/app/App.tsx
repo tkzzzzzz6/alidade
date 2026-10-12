@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+import { AgentSettings, compactSettings, sameSettings } from './agentSettings';
+import { AgentSettingsSection } from '../views/AgentSettingsSection';
 import React, { FC, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import '../scss/App.scss';
 
@@ -719,12 +721,16 @@ const ConfigDialog: React.FC<{
     const [paletteKey, setPaletteKey] = useState(
         (config.paletteKey && palettes[config.paletteKey]) ? config.paletteKey : defaultPaletteKey
     );
+    const [agentSettings, setAgentSettings] = useState<AgentSettings>(config.agentSettings ?? {});
+    // reopening the dialog starts from what is saved
+    useEffect(() => { if (open) setAgentSettings(config.agentSettings ?? {}); }, [open, config.agentSettings]);
 
     const hasChanges = formulateTimeoutSeconds !== config.formulateTimeoutSeconds || 
                       defaultChartWidth !== config.defaultChartWidth ||
                       defaultChartHeight !== config.defaultChartHeight ||
                       maxStretchFactor !== config.maxStretchFactor ||
                       frontendRowLimit !== config.frontendRowLimit ||
+                      !sameSettings(agentSettings, config.agentSettings) ||
                       paletteKey !== ((config.paletteKey && palettes[config.paletteKey]) ? config.paletteKey : defaultPaletteKey);
 
     return (
@@ -926,6 +932,8 @@ const ConfigDialog: React.FC<{
                                 </Typography>
                             </Box>
                         </Box>
+                        <Divider><Typography variant="caption">{t('config.agent.title')}</Typography></Divider>
+                        <AgentSettingsSection value={agentSettings} onChange={setAgentSettings} />
                     </Box>
                 </DialogContent>
                 <DialogActions sx={{'.MuiButton-root': {textTransform: 'none'}}}>
@@ -936,6 +944,7 @@ const ConfigDialog: React.FC<{
                         setMaxStretchFactor(2.0);
                         setFrontendRowLimit(rowLimitDefault);
                         setPaletteKey(defaultPaletteKey);
+                        setAgentSettings({});
                     }}>{t('session.resetToDefault')}</Button>
                     <Button onClick={() => setOpen(false)}>{t('app.cancel')}</Button>
                     <Button 
@@ -946,7 +955,8 @@ const ConfigDialog: React.FC<{
                             || isNaN(maxStretchFactor) || maxStretchFactor < 1 || maxStretchFactor > 5
                             || isNaN(frontendRowLimit) || frontendRowLimit < 100 || frontendRowLimit > rowLimitMax}
                         onClick={() => {
-                            dispatch(dfActions.setConfig({formulateTimeoutSeconds, defaultChartWidth, defaultChartHeight, maxStretchFactor, frontendRowLimit, paletteKey}));
+                            dispatch(dfActions.setConfig({formulateTimeoutSeconds, defaultChartWidth, defaultChartHeight, maxStretchFactor, frontendRowLimit, paletteKey,
+                                agentSettings: compactSettings(agentSettings)}));
                             setOpen(false);
                         }}
                     >

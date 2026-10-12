@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+import type { AgentSettings } from './agentSettings';
 import { createAsyncThunk, createSlice, PayloadAction, createSelector } from '@reduxjs/toolkit'
 import { Channel, Chart, ChartTemplate, DataCleanBlock, DataSourceConfig, EncodingItem, EncodingMap, FieldItem, Trigger, ChartStyleVariant, DraftNode, InteractionEntry, DeriveStatus, ChatMessage, PendingTableLoad, PendingClarification, TextTurn, InputTable, TableSemanticsInfo, LoadedTableNode, AgentPlanStep } from '../components/ComponentType'
 import { enableMapSet } from 'immer';
@@ -132,6 +133,8 @@ export interface ClientConfig {
     maxStretchFactor: number; // max per-axis stretch multiplier for chart sizing (default 1.5)
     frontendRowLimit: number; // max rows to keep in browser when loading locally (non-virtual)
     paletteKey: string; // active color palette key from tokens.ts
+    /** Per-run agent settings; a missing field follows the server default. */
+    agentSettings?: AgentSettings;
 }
 
 export interface GeneratedReport {
@@ -1091,8 +1094,9 @@ export const alidadeSlice = createSlice({
         setServerConfig: (state, action: PayloadAction<ServerConfig>) => {
             state.serverConfig = action.payload;
         },
-        setConfig: (state, action: PayloadAction<ClientConfig>) => {
-            state.config = action.payload;
+        setConfig: (state, action: PayloadAction<Partial<ClientConfig>>) => {
+            // merge: callers that edit some settings must not drop the others
+            state.config = { ...state.config, ...action.payload };
         },
         setViewMode: (state, action: PayloadAction<'editor' | 'report'>) => {
             state.viewMode = action.payload;

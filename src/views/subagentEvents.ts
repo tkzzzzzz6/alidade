@@ -103,3 +103,16 @@ export class PerStep<T> {
         this.values.delete(stepId || '');
     }
 }
+
+/**
+ * What one agent is doing right now: its newest line in the running list,
+ * without the status marker and the "[Step 2] " tag ('' when it has none).
+ */
+export function latestActivity(lines: string[], tag: string): string {
+    for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        if (!tag || !lineBelongsTo(line, tag)) continue;
+        return bare(line).slice(tag.length).split('\n')[0].trim();
+    }
+    return '';
+}

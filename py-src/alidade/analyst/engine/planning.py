@@ -183,15 +183,27 @@ conversation — so spell out the table, columns, time range, units and filters
 the user agreed to."""
 
 
-def planning_prompt(with_dependencies: bool | None = None) -> str:
+def planning_prompt(with_dependencies: bool | None = None, auto_advance: bool | None = None) -> str:
     """The planning section of the system prompt."""
     if with_dependencies is None:
         with_dependencies = subagents_enabled()
+    if auto_advance is None:
+        auto_advance = auto_advance_enabled()
     text = PLANNING_PROMPT.replace("{max_steps}", str(MAX_PLAN_STEPS))
     for key, value in _THRESHOLD[bool(with_dependencies)].items():
         text = text.replace("{" + key + "}", value)
-    text = text.replace("{status_rule}", _STATUS_RULE[auto_advance_enabled()])
+    text = text.replace("{status_rule}", _STATUS_RULE[bool(auto_advance)])
     return text + DEPENDENCY_PROMPT if with_dependencies else text
+
+
+def keep_subagent_info(new: list[dict[str, Any]], old: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Carry each step's ``subagent`` record (who worked on it, what it found)
+    over to a plan the model just rewrote, matching steps by id."""
+    info = {s.get("id"): s["subagent"] for s in old or [] if isinstance(s, dict) and s.get("subagent")}
+    if not info:
+        return new
+    return [{**s, "subagent": info[s["id"]]} if s.get("id") in info and "subagent" not in s else s
+            for s in new]
 
 
 def normalize_steps(raw: Any) -> list[dict[str, Any]]:

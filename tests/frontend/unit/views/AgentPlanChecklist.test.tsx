@@ -1,6 +1,6 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('react-i18next', () => ({
@@ -9,6 +9,10 @@ vi.mock('react-i18next', () => ({
     t: (key: string, params?: Record<string, any>) => {
       if (key === 'dataThread.planTitle') return 'Plan';
       if (key === 'dataThread.planProgress') return `${params?.done}/${params?.total} done`;
+      if (key === 'dataThread.stepTag') return `Step ${params?.n}`;
+      if (key.startsWith('dataThread.subagentStatus.')) return key.split('.').pop()!;
+      if (key === 'dataThread.subagentCharts') return `${params?.count} charts`;
+      if (key === 'dataThread.subagentStopAria') return `Stop ${params?.title}`;
       return key;
     },
   }),
@@ -47,5 +51,62 @@ describe('AgentPlanChecklist', () => {
   it('renders nothing without steps', () => {
     const { container } = render(<AgentPlanChecklist steps={[]} />);
     expect(container).toBeEmptyDOMElement();
+  });
+
+  describe('sub-agent steps', () => {
+    const running = [
+      { id: 's1', title: 'Margin by line', status: 'in_progress' as const,
+        subagent: { status: 'running', run_id: 'run1', started_at: Date.now() - 12_000 } },
+      { id: 's2', title: 'Churn by region', status: 'done' as const,
+        subagent: { status: 'success', run_id: 'run1', duration_s: 14.2, charts: 2,
+                    findings: 'North churns 4.1%.\nSouth 2.3%.' } },
+      { id: 's3', title: 'Relate the two', status: 'pending' as const },
+    ];
+    const lines = ['✓ [Step 1] dataThread.inspectingData sales', '[Step 1] dataThread.runningCode margin by line',
+                   '✓ [Step 2] other'].join('\x1E');
+
+    it('shows what a running sub-agent is doing and lets the user stop it', async () => {
+      const onStop = vi.fn().mockResolvedValue(true);
+      render(<AgentPlanChecklist steps={running} active runningPlan={lines} onStopStep={onStop} />);
+      const row = screen.getByTestId('subagent-s1');
+      expect(row).toHaveAttribute('data-subagent-status', 'running');
+      expect(row).toHaveTextContent('running');
+      expect(row).toHaveTextContent(/1[0-9]s/);
+      expect(row).toHaveTextContent('dataThread.runningCode margin by line');
+      // only the running step can be stopped; three steps are still three list items
+      expect(screen.getAllByRole('listitem')).toHaveLength(3);
+      const stop = screen.getByRole('button', { name: 'Stop Margin by line' });
+      await act(async () => { fireEvent.click(stop); });
+      expect(onStop).toHaveBeenCalledWith(running[0]);
+      expect(screen.getByRole('button', { name: 'Stop Margin by line' })).toBeDisabled();
+      expect(row).toHaveTextContent('dataThread.subagentStopping');
+    });
+
+    it('re-enables the stop button when the step was no longer running', async () => {
+      const onStop = vi.fn().mockResolvedValue(false);
+      render(<AgentPlanChecklist steps={running} active runningPlan={lines} onStopStep={onStop} />);
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Stop Margin by line' })); });
+      expect(screen.getByRole('button', { name: 'Stop Margin by line' })).not.toBeDisabled();
+    });
+
+    it('keeps a finished sub-agent\'s findings behind a toggle', () => {
+      render(<AgentPlanChecklist steps={running} active runningPlan={lines} />);
+      const done = screen.getByTestId('subagent-s2');
+      expect(done).toHaveTextContent('success · 14s · 2 charts');
+      expect(screen.queryByTestId('subagent-findings-s2')).toBeNull();
+      const toggle = screen.getByRole('button', { name: 'dataThread.subagentShow' });
+      expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      expect(toggle).toHaveTextContent('');                 // an icon only, no label text
+      fireEvent.click(toggle);
+      expect(screen.getByTestId('subagent-findings-s2')).toHaveTextContent('North churns 4.1%.');
+      expect(screen.getByRole('button', { name: 'dataThread.subagentHide' })).toHaveAttribute('aria-expanded', 'true');
+      expect(screen.getByText('dataThread.subagentSummary')).toBeInTheDocument();
+    });
+
+    it('after the run there is nothing to stop', () => {
+      render(<AgentPlanChecklist steps={running} onStopStep={vi.fn()} />);
+      expect(screen.queryByRole('button', { name: /^Stop / })).toBeNull();
+      expect(screen.getByTestId('subagent-s1')).not.toHaveTextContent('margin by line');
+    });
   });
 });

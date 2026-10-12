@@ -223,6 +223,52 @@ class SubResult(TypedDict):
 
 **并行实测（模拟模型，每次调用 1 秒，2 核容器）：** 3 个各画 1 张图的步骤，子 Agent 阶段从顺序约 6.3 秒降到并行约 4.1 秒，整次运行 8.4 → 6.4 秒。并行时每步变慢（2.1 → 4.0 秒），原因是几个子 Agent 同时启动 Python 进程、渲染图表，抢 2 个 CPU。真实模型每次调用要等几秒、几乎不占 CPU，收益应更大；评测时用 `-Jobs 1`，避免多道题同时跑互相抢 CPU。
 
+## 4.6 用户控制（2026-10-12）
+
+之前子 Agent 只能用后端环境变量开关，改了要重启；用户也看不到每个子 Agent 在做什么，只能整个停掉。现在：
+
+**每次运行的设置**（`engine/run_settings.py`）
+
+| 设置 | 环境变量（服务器默认） | 网页上可选范围 |
+|---|---|---|
+| 并行子 Agent | `ALIDADE_SUBAGENTS`（默认关） | 开 / 关 |
+| 同时运行几个 | `ALIDADE_MAX_SUBAGENTS`（3） | 1–4 |
+| 每个最多几张图 | `ALIDADE_SUBAGENT_MAX_CHARTS`（2） | 1–3 |
+| 单步时间上限 | `ALIDADE_SUBAGENT_TIMEOUT`（180 秒） | 30–600 秒 |
+| 计划自动推进 | `ALIDADE_PLAN_AUTO_ADVANCE`（默认开） | 开 / 关 |
+
+- 前端"设置 → Agent"里每项可以"跟随服务器默认"或手动指定，选择存在浏览器里（redux-persist），每次提问随请求发 `agent_settings`；没设的项不发，后端用环境变量。评测脚本和 MCP 服务器不发这个字段，行为不变。
+- 后端按上表范围截断请求里的值；环境变量只限制最小值（测试里会用 1 秒超时）。
+- 设置写进运行的检查点（`run_settings`）。一次运行在 `ask_user` 暂停后恢复，用的是开始时的设置，不会因为中途改了设置而换掉计划工具的格式。
+- 运行记录的每段里记下当时的设置，方便对比开 / 关。
+- `GET /api/agent/run-settings` 返回服务器默认值和范围，设置页用它显示"服务器默认（关）"。
+
+**单独停止一个子 Agent**（`engine/subagent_control.py`）
+
+- 分发节点给每个交出去的步骤登记一个可停止的句柄，键是（用户身份、运行 id、步骤 id）；步骤结束就注销。
+- `POST /api/agent/subagent-stop {run_id, step_id}`：只能停自己的运行；步骤已经结束时返回 `stopped: false`。
+- 停止在该子 Agent 下一次调模型之前生效（正在跑的 Python 代码会跑完）。
+- 被用户停止的步骤状态是 `cancelled`，计划里标为"跳过"；交给主 Agent 的结果里写明"用户停止了这一步，不要重做，在最终回答里说明"。超时是 `timeout`，整个运行被停止是 `stopped`，三者分开记录（句柄只记第一个原因）。
+- 登记表在进程内。后端是单进程、每个运行一个线程，够用；多进程部署时停止请求可能落到别的进程，会返回 `stopped: false`。
+
+**每个子 Agent 的状态记在它的计划步骤上**
+
+计划步骤多了一个 `subagent` 字段：`status`（`queued` → `running` → 结束状态）、`run_id`、`started_at`、`timeout_s`、`duration_s`、`charts`、`chart_titles`、`findings`（子 Agent 的 3–5 行结论）、`error`。
+
+- 后端在分发、开始、结束时更新它，并随 `plan` 事件发给前端；`subagent` 事件结束时也带上 `findings`。
+- 模型之后用 `update_plan` 重写计划时，按步骤 id 把 `subagent` 记录带过去（`planning.keep_subagent_info`），不会丢。
+- 因为记录在计划里，运行结束后线程里保留的计划也带着它，不用另外存。
+
+**前端**
+
+- 计划清单（`AgentPlanChecklist`）里，交给子 Agent 的步骤下面多一行：
+  - 运行中：状态、已用时间（每秒刷新）、它当前在做什么（从运行步骤列表里取这一步最新的一行），以及一个停止按钮，只停这一步，其他步骤继续。点了以后显示"正在停止…"；如果它已经结束，按钮恢复。
+  - 结束后：状态（完成 / 超时 / 已被你停止 / 失败）、用时、图表数，"查看结论"展开它的结论原文。
+- 标题旁显示"· N 步并行"。
+- 运行步骤列表里，被停止和超时的步骤有各自的提示文字。
+
+**测试：** `tests/backend/agents/test_subagent_controls.py`（设置合并与截断、请求覆盖环境变量、设置在暂停后保留、计划记录、单步停止、身份隔离、三个路由）；前端 `agentSettings.test.ts`、`AgentSettingsSection.test.tsx`、`AgentPlanChecklist.test.tsx`、`subagentEvents.test.ts`。
+
 ## 5. 时间表
 
 | 天 | 内容 | 可交付 |

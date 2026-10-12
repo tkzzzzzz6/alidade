@@ -108,6 +108,23 @@ export interface PendingClarification {
 }
 
 /** One step of the analyst's plan (streamed as `plan` events). */
+/** What a sub-agent did with one plan step (set by the backend dispatcher). */
+export interface SubagentRecord {
+    /** queued → running → success | budget_exhausted | timeout | cancelled | stopped | failed */
+    status: string;
+    /** the main run's id (used to stop this step) */
+    run_id?: string;
+    /** epoch ms when the sub-agent started */
+    started_at?: number;
+    timeout_s?: number;
+    duration_s?: number | null;
+    charts?: number;
+    chart_titles?: string[];
+    /** the sub-agent's closing summary (3–5 lines with its numbers) */
+    findings?: string;
+    error?: string;
+}
+
 export interface AgentPlanStep {
     id: string;
     title: string;
@@ -116,6 +133,8 @@ export interface AgentPlanStep {
     depends_on?: string[];
     /** self-contained task text for a sub-agent */
     goal?: string;
+    /** present when the step was handed to a sub-agent */
+    subagent?: SubagentRecord;
 }
 
 /** A finding of the analyst's rule-based chart self-check. */

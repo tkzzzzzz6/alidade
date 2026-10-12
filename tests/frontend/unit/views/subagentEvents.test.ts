@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+    latestActivity,
     PerStep, chartLabel, lineBelongsTo, lineTag, markToolDone, parallelSteps, stepNumber, tagLine, takeLinesFor,
 } from '../../../../src/views/subagentEvents';
 import { AgentPlanStep } from '../../../../src/components/ComponentType';
@@ -71,5 +72,13 @@ describe('subagentEvents', () => {
         expect(v.get(null)).toEqual(['main']);
         v.clear('s2');
         expect(v.get('s2')).toEqual([]);
+    });
+
+    it('finds what one agent is doing right now', () => {
+        const lines = ['✓ [Step 1] inspect sales', '[Step 2] run code B', '⚠ [Step 1] retrying chart\ndetails', 'main line'];
+        expect(latestActivity(lines, '[Step 1] ')).toBe('retrying chart');
+        expect(latestActivity(lines, '[Step 2] ')).toBe('run code B');
+        expect(latestActivity(lines, '[Step 3] ')).toBe('');
+        expect(latestActivity(lines, '')).toBe('');
     });
 });

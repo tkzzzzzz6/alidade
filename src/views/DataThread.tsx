@@ -89,8 +89,21 @@ import { ComponentBorderStyle, transition, radius, borderColor, conversationWidt
 import { SimpleChartRecBox } from './SimpleChartRecBox';
 import { InteractionEntryCard, ResolvedConversationCard, getEntryGutterIcon, getDefaultGutterIcon, PlanStepsView } from './InteractionEntryCard';
 import { AgentPlanChecklist } from './AgentPlanChecklist';
+import { stopSubagent } from '../app/agentSettings';
+
 import { fittableThreadColumnsFor, iconVar, textVar } from '../app/layout';
 import { useLayout } from '../app/LayoutProvider';
+
+/** Stop the sub-agent working on one plan step (false: it was no longer running). */
+const stopPlanStep = async (step: AgentPlanStep): Promise<boolean> => {
+    const runId = step.subagent?.run_id;
+    if (!runId) return false;
+    try {
+        return await stopSubagent(runId, step.id);
+    } catch {
+        return false;
+    }
+};
 
 /** Pick the icon component for a step line based on known prefixes. */
 // Re-exported from InteractionEntryCard — kept here for backward compat with gutter icon logic
@@ -1009,7 +1022,12 @@ let SingleThreadGroupView: FC<{
                     isRunning,
                     element: (
                         <Box sx={{ px: 1, py: 0.5 }}>
-                            <AgentPlanChecklist steps={agentPlan} active />
+                            <AgentPlanChecklist
+                                steps={agentPlan}
+                                active
+                                runningPlan={runningPlan}
+                                onStopStep={stopPlanStep}
+                            />
                         </Box>
                     ),
                 });
@@ -1119,6 +1137,27 @@ let SingleThreadGroupView: FC<{
                 // steps collapse into one run-on blob.
                 const planLines = (runningAction?.description || '')
                     .split('\x1E').map(s => s.trim()).filter(Boolean);
+                // A draft made after a chart has no interaction of its own: keep
+                // the live plan (with its sub-agents) above the steps here too.
+                const livePlan = runningDraft?.derive?.agentPlan;
+                if (livePlan && livePlan.length > 0) {
+                    timelineItems.push({
+                        key: `agent-plan-${tableId}`,
+                        type: 'chart',
+                        highlighted,
+                        isRunning: true,
+                        element: (
+                            <Box sx={{ px: 1, py: 0.5 }}>
+                                <AgentPlanChecklist
+                                    steps={livePlan}
+                                    active
+                                    runningPlan={runningDraft?.derive?.runningPlan || runningAction?.description}
+                                    onStopStep={stopPlanStep}
+                                />
+                            </Box>
+                        ),
+                    });
+                }
                 timelineItems.push({
                     key: `agent-running-${tableId}`,
                     type: 'chart',
@@ -1345,7 +1384,11 @@ let SingleThreadGroupView: FC<{
                     </Typography>
                     {turn.agentPlan && turn.agentPlan.length > 0 && (
                         <Box sx={{ mt: 0.5 }}>
-                            <AgentPlanChecklist steps={turn.agentPlan} compact={!isFocused} />
+                            <AgentPlanChecklist
+                                steps={turn.agentPlan}
+                                // a plan worked on by sub-agents stays open: it holds their findings
+                                compact={!isFocused && !turn.agentPlan.some(s => s.subagent)}
+                            />
                         </Box>
                     )}
                 </Box>

@@ -29,6 +29,7 @@ import { resolveRecommendedChart, getUrls, getTriggers, translateBackend } from 
 import { streamRequest, apiRequest } from '../app/apiClient';
 import { getErrorMessage } from '../app/errorCodes';
 import { Chart, ClarificationResponse, DictTable, FieldItem, createDictTable, InteractionEntry, computeInsightKey, TextTurn, TableSemanticsInfo, ROOTLESS_THREAD_ID, AgentPlanStep, ChartCheckIssue } from "../components/ComponentType";
+import { toRequestSettings } from '../app/agentSettings';
 import { PerStep, chartLabel, lineTag, markToolDone, stepNumber, tagLine, takeLinesFor } from './subagentEvents';
 import { normalizeClarifyEvent, formatClarificationResponses } from '../app/clarification';
 import { parseDataOperation } from '../dataOperations/models';
@@ -791,6 +792,9 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
             model: activeModel,
             max_iterations: 10,
         };
+        // the user's agent settings (sub-agents, plan behaviour); unset = server default
+        const agentSettings = toRequestSettings(config.agentSettings);
+        if (agentSettings) requestBody.agent_settings = agentSettings;
 
         // ── Route through the unified AnalystAgent (design-35/36) ──
         // The unified agent can also write reports inside the same run, so we
@@ -1193,6 +1197,10 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
                     line = '📋 ' + t('dataThread.subagentStarted', { step: label, title });
                 } else if (result.status === "success" || result.status === "budget_exhausted") {
                     line = '✓ ' + t('dataThread.subagentDone', { step: label, charts: result.charts ?? 0 });
+                } else if (result.status === "cancelled") {
+                    line = '⚠ ' + t('dataThread.subagentCancelled', { step: label });
+                } else if (result.status === "timeout") {
+                    line = '⚠ ' + t('dataThread.subagentTimeout', { step: label });
                 } else {
                     line = '⚠ ' + t('dataThread.subagentFailed', { step: label, status: result.status || '' });
                 }

@@ -58,6 +58,7 @@ class AnalystState(TypedDict, total=False):
     after_tools: str            # "agent", or "subagents" when a new plan can be fanned out
     dispatched_steps: list[str]  # plan step ids already handed to sub-agents
     subagent_rounds: int        # fan-out rounds so far (bounded)
+    run_settings: dict[str, Any]  # per-run agent settings (see run_settings.py); kept for resumes
 
     # ── outcome ────────────────────────────────────────────────────────
     final_text: str
