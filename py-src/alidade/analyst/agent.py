@@ -36,6 +36,7 @@ from alidade.agents.context import (
 from alidade.agents.client_utils import Client
 from alidade.analyst.engine import checkpoints
 from alidade.analyst.engine import chart_check
+from alidade.analyst.engine import routing
 from alidade.analyst.engine.execution import CodeExecutor
 from alidade.analyst.engine.graph import RECURSION_LIMIT, AnalystGraph
 from alidade.analyst.engine.planning import plan_tool, planning_prompt
@@ -62,6 +63,21 @@ logger = logging.getLogger(__name__)
 _TERMINAL_EVENTS = frozenset({"completion", "interact"})
 
 
+def _fast_client_for(client: Any) -> Any:
+    """A client for ``ALIDADE_FAST_MODEL`` on the same provider, or None when
+    routing is off (not set, same as the main model, or the client cannot switch)."""
+    name = routing.fast_model_name()
+    if not name or not hasattr(client, "with_model"):
+        return None
+    if name == getattr(client, "model_name", None) or name == getattr(client, "model", None):
+        return None
+    try:
+        return client.with_model(name)
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not create a client for %s; routing is off", name, exc_info=True)
+        return None
+
+
 class AnalystAgent:
     """Unified data analyst agent — core actions + on-demand skills."""
 
@@ -78,6 +94,11 @@ class AnalystAgent:
         identity_id: str | None = None,
     ):
         self.client = client
+        # model routing: a cheaper model of the same provider for routine steps
+        self.fast_client = _fast_client_for(client)
+        # ... and/or a different reasoning effort per tier (same model)
+        self.tier_efforts = routing.tier_efforts()
+        self.routing_on = self.fast_client is not None or any(self.tier_efforts.values())
         self.workspace = workspace
         self.registry = skill_registry or build_registry()
         self.agent_exploration_rules = agent_exploration_rules
@@ -117,6 +138,16 @@ class AnalystAgent:
         self._chart_check_failures = 0
         self._chart_check_note = ""
         self._write: Callable[[dict[str, Any]], None] = lambda _event: None
+
+    def effort_for(self, tier: str) -> str | None:
+        """The reasoning effort for a routing tier (None = the usual one)."""
+        return self.tier_efforts.get(tier)
+
+    def client_for(self, tier: str) -> Client:
+        """The client for a routing tier (see :mod:`.engine.routing`)."""
+        if tier == routing.FAST and self.fast_client is not None:
+            return self.fast_client
+        return self.client
 
     # ==================================================================
     # Public API

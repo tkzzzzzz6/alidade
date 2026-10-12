@@ -49,7 +49,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from alidade.agents.context import handle_inspect_source_data
-from alidade.analyst.engine import compression, llm, planning
+from alidade.analyst.engine import compression, llm, planning, routing
 from alidade.analyst.engine.prompts import CORE_SKILL
 from alidade.analyst.engine.state import AnalystState
 from alidade.analyst.skills import SkillContext, ToolResult
@@ -201,11 +201,17 @@ class AnalystGraph:
         rlog.log("llm_request", iteration=cycles + 1, round=tool_rounds,
                  messages_count=len(messages),
                  tools_available=[t["function"]["name"] for t in tools])
+        choice = routing.pick(messages, routing_on=agent.routing_on,
+                              sub_agent=should_stop is not None)
         t0 = time.time()
         try:
-            resp = llm.stream_completion(
-                agent.client, messages, tools, self.registry.action_stream_spec, write,
-            )
+            resp = self._call_model(choice, messages, tools, write)
+            if not resp.tool_calls and choice.tier == routing.FAST:
+                # the cheap model wants to end the run: check its answer first
+                why = routing.review_final(resp.content or "", messages)
+                if why:
+                    choice = routing.Choice(routing.STRONG, why)
+                    resp = self._call_model(choice, messages, tools, write)
         except Exception as exc:  # noqa: BLE001 — surfaced as a run error
             from alidade.security.sanitize import classify_llm_error
             logger.error("[AnalystGraph] LLM call failed", exc_info=exc)
@@ -243,6 +249,31 @@ class AnalystGraph:
         return self._commit_action(
             action_calls, readonly_calls, messages, content, resp, cycles, tool_rounds, write,
         )
+
+    def _call_model(self, choice: "routing.Choice", messages: list[dict], tools: list[dict],
+                    write) -> Any:
+        """One streaming LLM call on the model ``choice`` picks; reports it as an
+        ``llm_call`` event (model, tier, why, time, tokens) for the run trace."""
+        agent = self.agent
+        client = agent.client_for(choice.tier)
+        effort = agent.effort_for(choice.tier)
+        t0 = time.time()
+        resp = llm.stream_completion(client, messages, tools, self.registry.action_stream_spec, write,
+                                     effort=effort)
+        usage = resp.usage or {}
+        write({
+            "type": "llm_call",
+            "model": getattr(client, "model_name", None) or getattr(client, "model", ""),
+            "effort": effort,
+            "tier": choice.tier,
+            "reason": choice.reason,
+            "duration_ms": int((time.time() - t0) * 1000),
+            "prompt_tokens": usage.get("prompt"),
+            "completion_tokens": usage.get("completion"),
+            "cached_tokens": usage.get("cached"),
+            "tool_calls": [tc["function"]["name"] for tc in resp.tool_calls or []],
+        })
+        return resp
 
     def _commit_action(self, action_calls, readonly_calls, messages, content, resp,
                        cycles, tool_rounds, write) -> dict[str, Any]:
@@ -335,7 +366,17 @@ class AnalystGraph:
         agent = self.agent
 
         def complete(msgs: list[dict]) -> str:
-            return llm.plain_completion(agent.client, msgs)
+            tier = routing.FAST if agent.routing_on else routing.MAIN
+            client = agent.client_for(tier)
+            t0 = time.time()
+            text, usage = llm.plain_completion_with_usage(client, msgs)
+            usage = usage or {}
+            write({"type": "llm_call", "model": getattr(client, "model_name", None) or getattr(client, "model", ""),
+                   "tier": tier, "reason": "compress earlier steps",
+                   "duration_ms": int((time.time() - t0) * 1000),
+                   "prompt_tokens": usage.get("prompt"), "completion_tokens": usage.get("completion"),
+                   "cached_tokens": usage.get("cached"), "tool_calls": []})
+            return text
 
         compressed, info = compression.compress_if_needed(messages, complete)
         if info is None:

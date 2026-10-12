@@ -132,7 +132,7 @@ def parallel_tools_enabled() -> bool:
     return os.environ.get("ALIDADE_PARALLEL_TOOLS", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
-def open_stream(client: Any, messages: list[dict], tools: list[dict]):
+def open_stream(client: Any, messages: list[dict], tools: list[dict], effort: str | None = None):
     """Open a streaming LLM call with tools, retrying transient errors before
     any token is consumed.
 
@@ -148,10 +148,20 @@ def open_stream(client: Any, messages: list[dict], tools: list[dict]):
             kwargs: dict[str, Any] = {
                 "tools": tools,
                 "stream": True,
-                "reasoning_effort": reasoning_effort_for(AGENT_ID, client.model),
+                # a routing tier may ask for its own effort (see routing.tier_efforts)
+                "reasoning_effort": effort or reasoning_effort_for(AGENT_ID, client.model),
             }
             if not parallel_tools_enabled():
                 kwargs["parallel_tool_calls"] = False
+            if effort:
+                # LiteLLM drops reasoning_effort for models it does not know
+                # (e.g. "openai/deepseek-flash"), so a routing tier's effort
+                # would never reach the provider; let it through explicitly.
+                # (The agent's usual effort is left to LiteLLM as before.)
+                kwargs["allowed_openai_params"] = ["reasoning_effort"]
+            if getattr(client, "endpoint", "") != "ollama":
+                # token usage for the run trace (the last chunk carries it)
+                kwargs["stream_options"] = {"include_usage": True}
             return client.get_completion_with_tools(messages, **kwargs)
         except Exception as e:  # noqa: BLE001 — classified below
             last_exc = e
@@ -174,13 +184,19 @@ def plain_completion(client: Any, messages: list[dict]) -> str:
     retried like the main call; anything else propagates to the caller, which
     treats these auxiliary calls as best-effort.
     """
+    return plain_completion_with_usage(client, messages)[0]
+
+
+def plain_completion_with_usage(client: Any, messages: list[dict]) -> tuple[str, dict[str, int] | None]:
+    """:func:`plain_completion` plus the provider-reported token usage."""
     last_exc: Exception | None = None
     for attempt in range(MAX_LLM_RETRIES):
         try:
             resp = client.get_completion(messages, stream=False)
             if not getattr(resp, "choices", None):
-                return ""
-            return (resp.choices[0].message.content or "").strip()
+                return "", usage_numbers(getattr(resp, "usage", None))
+            return ((resp.choices[0].message.content or "").strip(),
+                    usage_numbers(getattr(resp, "usage", None)))
         except Exception as e:  # noqa: BLE001
             last_exc = e
             if is_transient_error(e) and attempt < MAX_LLM_RETRIES - 1:
@@ -190,13 +206,52 @@ def plain_completion(client: Any, messages: list[dict]) -> str:
     raise last_exc  # pragma: no cover
 
 
+# ── Token usage ───────────────────────────────────────────────────────────
+
+
+def _field(obj: Any, key: str) -> Any:
+    if obj is None:
+        return None
+    return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
+
+def _number(value: Any) -> int | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+    return None
+
+
+def usage_numbers(usage: Any) -> dict[str, int] | None:
+    """``{"prompt", "completion", "cached"}`` from a provider usage object.
+
+    ``cached`` is the prompt tokens served from the provider's prefix cache
+    (OpenAI ``prompt_tokens_details.cached_tokens``, DeepSeek
+    ``prompt_cache_hit_tokens``, Anthropic ``cache_read_input_tokens``); it is
+    absent when the provider does not say. ``None`` when there is no usage.
+    """
+    prompt = _number(_field(usage, "prompt_tokens"))
+    completion = _number(_field(usage, "completion_tokens"))
+    if prompt is None and completion is None:
+        return None
+    out = {"prompt": prompt or 0, "completion": completion or 0}
+    for value in (_field(_field(usage, "prompt_tokens_details"), "cached_tokens"),
+                  _field(usage, "prompt_cache_hit_tokens"),
+                  _field(usage, "cache_read_input_tokens")):
+        cached = _number(value)
+        if cached is not None:
+            out["cached"] = cached
+            break
+    return out
+
+
 # ── Streaming call with live forwarding ───────────────────────────────────
 
 
 class StreamResult(SimpleNamespace):
     """Reassembled response: ``content``, ``tool_calls``, ``reasoning_content``,
-    ``finish_reason`` and ``streamed_channels`` (tool_call_id -> channel whose
-    argument was already forwarded live)."""
+    ``finish_reason``, ``streamed_channels`` (tool_call_id -> channel whose
+    argument was already forwarded live) and ``usage`` (see
+    :func:`usage_numbers`; ``None`` when the provider sent none)."""
 
 
 def stream_completion(
@@ -205,6 +260,7 @@ def stream_completion(
     tools: list[dict],
     stream_spec_for: Callable[[str], tuple[str, str] | None],
     write: EventWriter,
+    effort: str | None = None,
 ) -> StreamResult:
     """Run one streaming LLM call and return the reassembled response.
 
@@ -213,7 +269,7 @@ def stream_completion(
     ``action`` commitment event is written once, then the growing ``field``
     argument is forwarded as ``text_delta`` events on ``channel``.
     """
-    stream = open_stream(client, messages, tools)
+    stream = open_stream(client, messages, tools, effort)
 
     content_parts: list[str] = []
     reasoning_acc: str | None = None
@@ -221,8 +277,12 @@ def stream_completion(
     tool_calls_acc: dict[int, dict[str, Any]] = {}
     streamers: dict[int, dict[str, Any]] = {}
     streamed_channels: dict[str, str] = {}
+    usage: dict[str, int] | None = None
 
     for chunk in stream:
+        numbers = usage_numbers(getattr(chunk, "usage", None))
+        if numbers is not None:
+            usage = numbers
         if not getattr(chunk, "choices", None):
             continue
         choice0 = chunk.choices[0]
@@ -267,6 +327,7 @@ def stream_completion(
         reasoning_content=reasoning_acc,
         finish_reason=finish_reason,
         streamed_channels=streamed_channels,
+        usage=usage,
     )
 
 

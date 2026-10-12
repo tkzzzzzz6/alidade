@@ -21,6 +21,7 @@ is kept in [docs/upstream/CHANGELOG.md](docs/upstream/CHANGELOG.md).
 - Sub-agent progress in the UI: lines from each parallel step are tagged ("[Step 2] …") and closed per step, each chart is labelled with its step, and the status line says which steps run at the same time. Stopping a run now also stops its running sub-agents.
 - When a question is partly outside the loaded data (a year or field that is not there), the agent answers what the data supports and says what is missing instead of stopping to ask.
 - `ALIDADE_PLAN_AUTO_ADVANCE=0` switches plan auto-advance off, for A/B evaluation only.
+- **Model routing** (`ALIDADE_FAST_MODEL`): the model the user picked handles reading the question, the user's answers and recovery after a failed step; a cheaper model of the same provider does routine steps. A final answer from the cheaper model whose numbers have no source in the run is redone by the strong model. Tiers can also differ by reasoning effort on one model (`ALIDADE_STRONG_EFFORT` / `ALIDADE_FAST_EFFORT`, e.g. DeepSeek high / low); the tier's effort is passed through LiteLLM, which otherwise drops it for models it does not know.
 - Data quality check: each table in the agent's context comes with code-computed notes on duplicate rows, numbers or dates stored as text (and mixed date formats), the same label spelled differently, and missing values, each with the fix.
 
 ### Evaluation

@@ -275,6 +275,25 @@ class Client(object):
             else:
                 self.model = f"ollama/{model}"
 
+    _MODEL_PREFIX = {"openai": "openai/", "gemini": "gemini/", "anthropic": "anthropic/", "ollama": "ollama/"}
+
+    def with_model(self, model: str) -> "Client":
+        """A client for another model on the same endpoint and credentials
+        (e.g. a cheaper model of the same provider)."""
+        import copy
+        clone = copy.copy(self)
+        clone.params = dict(self.params)
+        prefix = self._MODEL_PREFIX.get(self.endpoint, "")
+        model = model.strip()
+        clone.model = model if (not prefix or model.startswith(prefix)) else prefix + model
+        return clone
+
+    @property
+    def model_name(self) -> str:
+        """The model name without LiteLLM's provider prefix."""
+        prefix = self._MODEL_PREFIX.get(self.endpoint, "")
+        return self.model[len(prefix):] if prefix and self.model.startswith(prefix) else self.model
+
     def _strip_image_blocks(self, content):
         """Remove image_url blocks from multimodal content arrays."""
         if isinstance(content, list):
