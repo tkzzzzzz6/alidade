@@ -100,6 +100,7 @@ include = ["alidade*"]
 
 [project.scripts]
 alidade = "alidade:run_app"
+alidade-mcp = "alidade.mcp_server:main"
 
 [tool.uv]
 dev-dependencies = [
