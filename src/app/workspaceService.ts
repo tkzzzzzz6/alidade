@@ -273,6 +273,23 @@ export async function importWorkspace(
     return migrateState(data.state);
 }
 
+/**
+ * Import a bundled demo session. The server reads the zip from its own demos
+ * folder: fetching the .zip in the page breaks when a download manager
+ * intercepts .zip requests (the page then uploads an empty body).
+ */
+export async function importDemoWorkspace(
+    demoPath: string,
+    workspaceId: string,
+): Promise<Record<string, any>> {
+    const { data } = await apiRequest<{ state: any }>(getUrls().SESSION_IMPORT_DEMO, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ demo: demoPath, workspace_id: workspaceId }),
+    });
+    return migrateState(data.state);
+}
+
 // ── Table operations ────────────────────────────────────────────────────
 
 /** Delete a table from the workspace. */

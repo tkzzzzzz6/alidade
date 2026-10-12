@@ -66,7 +66,7 @@ import { useDataRefresh, useDerivedTableRefresh } from '../app/useDataRefresh';
 import { useTranslation } from 'react-i18next';
 import { fetchWithIdentity, getUrls, CONNECTOR_URLS } from '../app/utils';
 import { apiRequest } from '../app/apiClient';
-import { listWorkspaces, loadWorkspace, deleteWorkspace, exportWorkspace, importWorkspace, onWorkspaceListChanged, updateWorkspaceMeta, WorkspaceLoadSupersededError } from '../app/workspaceService';
+import { listWorkspaces, loadWorkspace, deleteWorkspace, exportWorkspace, importWorkspace, importDemoWorkspace, onWorkspaceListChanged, updateWorkspaceMeta, WorkspaceLoadSupersededError } from '../app/workspaceService';
 import type { WorkspaceSummary } from '../app/workspaceService';
 import { AppDispatch, store } from '../app/store';
 import { generateUUID } from '../app/identity';
@@ -402,17 +402,12 @@ export const AlidadeFC = ({ }) => {
         }));
 
         try {
-            // Fetch the workspace zip
-            const res = await fetch(session.workspace);
-            if (!res.ok) throw new Error(`Failed to fetch ${session.workspace}`);
-            const blob = await res.blob();
-            const file = new File([blob], `${session.id}.zip`, { type: 'application/zip' });
-
-            // Import via the standard workspace import flow (parquet + state)
+            // The server imports the bundled zip itself (the browser never
+            // downloads it, so a download manager cannot get in the way).
             const wsId = generateSessionId();
             // Set workspace ID first so fetchWithIdentity sends X-Workspace-Id header
             dispatch(dfActions.setActiveWorkspace({ id: wsId, displayName: session.title }));
-            const state = await importWorkspace(file, wsId, session.title);
+            const state = await importDemoWorkspace(session.workspace, wsId);
             dispatch(dfActions.loadState({ ...state, activeWorkspace: { id: wsId, displayName: session.title } }));
 
             dispatch(dfActions.addMessages({

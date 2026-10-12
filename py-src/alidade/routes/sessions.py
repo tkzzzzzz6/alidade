@@ -24,10 +24,13 @@ Note: URL prefix kept as /api/sessions for frontend compatibility.
 import errno
 import io
 import logging
+import re
+import zipfile
+from pathlib import Path
 from datetime import datetime
 from typing import NoReturn
 
-from flask import Blueprint, request, send_file
+from flask import Blueprint, current_app, request, send_file
 
 from alidade.auth.identity import get_identity_id
 from alidade.error_handler import json_ok
@@ -267,6 +270,36 @@ def export_session():
     return send_file(buf, mimetype="application/zip", as_attachment=True, download_name=filename)
 
 
+def _target_workspace(workspace_id: str):
+    """The workspace to import into (created when it does not exist yet)."""
+    identity_id = get_identity_id()
+    mgr = get_workspace_manager(identity_id)
+    if workspace_id:
+        if mgr.workspace_exists(workspace_id):
+            return mgr.open_workspace(workspace_id, identity_id)
+        return mgr.create_and_open_workspace(workspace_id, identity_id)
+    return get_workspace(identity_id)
+
+
+def _import_zip_bytes(data: bytes, workspace_id: str):
+    if not data.startswith(b"PK"):
+        # e.g. a download manager took over the browser's request and the
+        # page uploaded an empty / partial body
+        raise AppError(ErrorCode.INVALID_REQUEST,
+                       f"The uploaded file is not a zip ({len(data)} bytes received)")
+    try:
+        ws = _target_workspace(workspace_id)
+        state = ws.import_session_zip(io.BytesIO(data))
+        return json_ok({"state": state})
+    except AppError:
+        raise
+    except (ValueError, zipfile.BadZipFile):
+        raise AppError(ErrorCode.INVALID_REQUEST, "Invalid session file")
+    except Exception as e:
+        logger.error("Error importing session", exc_info=e)
+        raise AppError(ErrorCode.INTERNAL_ERROR, "Failed to import session")
+
+
 @session_bp.route("/import", methods=["POST"])
 def import_session():
     """Import a workspace from a zip.
@@ -278,29 +311,43 @@ def import_session():
     """
     if "file" not in request.files:
         raise AppError(ErrorCode.INVALID_REQUEST, "No file uploaded")
-
-    file = request.files["file"]
     workspace_id = (request.form.get("workspace_id") or "").strip()
+    return _import_zip_bytes(request.files["file"].read(), workspace_id)
 
-    try:
-        identity_id = get_identity_id()
-        mgr = get_workspace_manager(identity_id)
 
-        if workspace_id:
-            if mgr.workspace_exists(workspace_id):
-                ws = mgr.open_workspace(workspace_id, identity_id)
-            else:
-                ws = mgr.create_and_open_workspace(workspace_id, identity_id)
-        else:
-            ws = get_workspace(identity_id)
+_DEMO_NAME = re.compile(r"^demo_[A-Za-z0-9_-]{1,64}\.zip$")
 
-        state = ws.import_session_zip(io.BytesIO(file.read()))
-        return json_ok({"state": state})
-    except ValueError:
-        raise AppError(ErrorCode.INVALID_REQUEST, "Invalid session file")
-    except Exception as e:
-        logger.error("Error importing session", exc_info=e)
-        raise AppError(ErrorCode.INTERNAL_ERROR, "Failed to import session")
+
+def demo_dirs() -> list[Path]:
+    """Where the bundled demo sessions live: the built frontend's ``demos``
+    folder, and ``public/demos`` in a source checkout (dev server)."""
+    dirs: list[Path] = []
+    static = current_app.static_folder if current_app else None
+    if static:
+        dirs.append(Path(static) / "demos")
+    dirs.append(Path(__file__).resolve().parents[3] / "public" / "demos")
+    return dirs
+
+
+@session_bp.route("/import-demo", methods=["POST"])
+def import_demo_session():
+    """Import a bundled demo session by name: ``{demo, workspace_id}``.
+
+    The server reads the zip from its own demos folder, so the browser never
+    downloads it. (Fetching the .zip in the page and uploading it again breaks
+    when a download manager intercepts .zip requests: the page gets an empty
+    or partial body.) ``demo`` is a file name such as
+    ``demo_movies.zip`` or the demo's URL path (``/demos/demo_movies.zip``).
+    """
+    body = request.get_json(silent=True) or {}
+    name = str(body.get("demo") or "").strip().rsplit("/", 1)[-1]
+    if not _DEMO_NAME.match(name):
+        raise AppError(ErrorCode.INVALID_REQUEST, "Unknown demo")
+    path = next((d / name for d in demo_dirs() if (d / name).is_file()), None)
+    if path is None:
+        raise AppError(ErrorCode.INVALID_REQUEST, f"Demo not found: {name}")
+    workspace_id = str(body.get("workspace_id") or "").strip()
+    return _import_zip_bytes(path.read_bytes(), workspace_id)
 
 
 @session_bp.route("/migrate", methods=["POST"])

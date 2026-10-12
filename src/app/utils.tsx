@@ -85,6 +85,7 @@ export function getUrls() {
         SESSION_DELETE: `/api/sessions/delete`,
         SESSION_EXPORT: `/api/sessions/export`,
         SESSION_IMPORT: `/api/sessions/import`,
+        SESSION_IMPORT_DEMO: `/api/sessions/import-demo`,
         SESSION_UPDATE_META: `/api/sessions/update-meta`,
 
         // Workspace

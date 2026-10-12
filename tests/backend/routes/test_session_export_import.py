@@ -201,3 +201,57 @@ class TestImportSession:
         body = resp.get_json()
         assert body["status"] == "error"
         assert body["error"]["code"] == "INVALID_REQUEST"
+
+
+# ── Import a bundled demo (read on the server) ────────────────────────────
+
+
+class TestImportDemo:
+    def _mgr(self, state=None):
+        ws = MagicMock()
+        ws.import_session_zip.return_value = state or {"tables": ["t"]}
+        mgr = MagicMock()
+        mgr.workspace_exists.return_value = False
+        mgr.create_and_open_workspace.return_value = ws
+        return mgr, ws
+
+    def test_imports_a_demo_from_the_server_folder(self, client, tmp_path):
+        (tmp_path / "demo_movies.zip").write_bytes(_make_zip_bytes())
+        mgr, ws = self._mgr()
+        with (
+            patch("alidade.routes.sessions.get_identity_id", return_value="user:alice"),
+            patch("alidade.routes.sessions.get_workspace_manager", return_value=mgr),
+            patch("alidade.routes.sessions.demo_dirs", return_value=[tmp_path]),
+        ):
+            resp = client.post("/api/sessions/import-demo",
+                               json={"demo": "/demos/demo_movies.zip", "workspace_id": "ws-9"})
+        body = resp.get_json()
+        assert body["status"] == "success" and body["data"]["state"] == {"tables": ["t"]}
+        mgr.create_and_open_workspace.assert_called_once_with("ws-9", "user:alice")
+        assert ws.import_session_zip.call_args.args[0].read()[:2] == b"PK"
+
+    @pytest.mark.parametrize("demo", ["../secrets.zip", "demo_x.txt", "", "demo_missing.zip"])
+    def test_rejects_unknown_or_unsafe_names(self, client, tmp_path, demo):
+        with (
+            patch("alidade.routes.sessions.get_identity_id", return_value="user:alice"),
+            patch("alidade.routes.sessions.demo_dirs", return_value=[tmp_path]),
+        ):
+            body = client.post("/api/sessions/import-demo", json={"demo": demo}).get_json()
+        assert body["status"] == "error"
+
+    def test_bundled_demos_are_real_zips(self):
+        from pathlib import Path
+        demos = Path(__file__).resolve().parents[3] / "public" / "demos"
+        zips = sorted(demos.glob("demo_*.zip"))
+        assert zips and all(p.read_bytes()[:2] == b"PK" for p in zips)
+
+
+def test_upload_that_is_not_a_zip_says_so(client):
+    with patch("alidade.routes.sessions.get_identity_id", return_value="user:alice"):
+        body = client.post(
+            "/api/sessions/import",
+            data={"file": (io.BytesIO(b""), "x.zip"), "workspace_id": "ws-1"},
+            content_type="multipart/form-data",
+        ).get_json()
+    assert body["status"] == "error"
+    assert "not a zip (0 bytes received)" in body["error"]["message"]
