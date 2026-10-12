@@ -36,7 +36,7 @@ from alidade.agents.context import (
 from alidade.agents.client_utils import Client
 from alidade.analyst.engine import checkpoints
 from alidade.analyst.engine import chart_check
-from alidade.analyst.engine import routing
+from alidade.analyst.engine import insights, routing
 from alidade.knowledge import definitions
 from alidade.knowledge.definitions import DefinitionStore
 from alidade.analyst.engine.execution import CodeExecutor
@@ -302,7 +302,7 @@ class AnalystAgent:
     def _current_tools(self, loaded: set[str]) -> list[dict[str, Any]]:
         """Inspection tools (core + load_skill + loaded skills' tools) plus the
         action tools of loaded skills."""
-        extra: list[dict[str, Any]] = []
+        extra = [insights.FIND_INSIGHTS_TOOL]
         if self._definitions is not None and definitions.definitions_enabled():
             extra.append(definitions.SAVE_TOOL)
         return build_tools(
@@ -310,6 +310,31 @@ class AnalystAgent:
             [*self.registry.tools_for(loaded), plan_tool(), *extra],
             action_tools=self.registry.action_tools_for(loaded),
         )
+
+    def find_insights(self, args: dict[str, Any], input_tables: list[dict[str, Any]],
+                      write: Callable[[dict[str, Any]], None]) -> tuple[str, str]:
+        """The ``find_insights`` tool: a statistical scan of the named tables."""
+        known = {t.get("name") for t in input_tables or [] if isinstance(t, dict)}
+        names = [n for n in args.get("table_names") or [] if n in known] or (
+            [next(iter(known))] if len(known) == 1 else [])
+        if not names:
+            return f"Name the table(s) to scan; available: {', '.join(sorted(k for k in known if k))}.", "error"
+        try:
+            limit = max(1, min(int(args.get("max_findings") or 6), 12))
+        except (TypeError, ValueError):
+            limit = 6
+        parts = []
+        for name in names[:3]:
+            try:
+                df = self.workspace.read_data_as_df(name)
+            except Exception as exc:  # noqa: BLE001
+                parts.append(f"Could not read {name}: {exc}")
+                continue
+            result = insights.scan(df, max_findings=limit, focus=args.get("focus") or None)
+            write({"type": "insights", "table": name, "rows": result.rows, "tests": result.tests,
+                   "findings": [f.to_dict() for f in result.findings]})
+            parts.append(insights.describe(name, result))
+        return "\n\n".join(parts), "ok"
 
     def save_definition(self, args: dict[str, Any], question: str,
                         input_tables: list[dict[str, Any]]) -> tuple[str, str]:

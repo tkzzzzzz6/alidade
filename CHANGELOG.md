@@ -23,6 +23,7 @@ is kept in [docs/upstream/CHANGELOG.md](docs/upstream/CHANGELOG.md).
 - `ALIDADE_PLAN_AUTO_ADVANCE=0` switches plan auto-advance off, for A/B evaluation only.
 - **Model routing** (`ALIDADE_FAST_MODEL`): the model the user picked handles reading the question, the user's answers and recovery after a failed step; a cheaper model of the same provider does routine steps. A final answer from the cheaper model whose numbers have no source in the run is redone by the strong model. Tiers can also differ by reasoning effort on one model (`ALIDADE_STRONG_EFFORT` / `ALIDADE_FAST_EFFORT`, e.g. DeepSeek high / low); the tier's effort is passed through LiteLLM, which otherwise drops it for models it does not know.
 - **Saved definitions**: once the user answers what a vague word means ("best" = lowest price), the agent saves it (`save_definition`); later questions using the same word on the same tables use it without asking and say so. Listed and deletable in the knowledge panel (`ALIDADE_DEFINITIONS=0` turns it off).
+- **Insight scan** (`find_insights`): trends, level shifts, group differences, correlations, outliers and concentration found with statistical tests and Benjamini–Hochberg false-discovery control, aware of one-series-per-entity tables; a "Find insights" chip in the chat box.
 - Data quality check: each table in the agent's context comes with code-computed notes on duplicate rows, numbers or dates stored as text (and mixed date formats), the same label spelled differently, and missing values, each with the fix.
 
 ### Evaluation

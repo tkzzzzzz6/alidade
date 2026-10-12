@@ -1269,6 +1269,8 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
                     pushTool(t('dataThread.searching') + (query ? ` "${query}"` : ''));
                 } else if (result.tool === "save_definition") {
                     pushTool(t('dataThread.savingDefinition', { term: result.term || '' }));
+                } else if (result.tool === "find_insights") {
+                    pushTool(t('dataThread.findingInsights', { tables: (result.table_names || []).join(', ') }));
                 } else if (["visualize", "clarify", "present", "action"].includes(result.tool)) {
                     pushTool(t('dataThread.producingAction', { action: result.tool }));
                 }
@@ -2618,11 +2620,12 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
     const focusedStarterFresh = !!focusedStarterEntry && focusedStarterEntry.signature === rootTableSignature;
     const starterLoading = !!focusedRootTableId && (!focusedStarterFresh || focusedStarterStatus === 'loading');
 
+    // The "find insights" chip is always offered on a focused table; the
+    // AI-generated starter questions follow when they are ready.
     const showGettingStarted = !!focusedRootTableId
         && !isChatFormulating
         && !pendingClarification
-        && !focusedTextTurn
-        && (starterLoading || (focusedStarterEntry?.questions?.length ?? 0) > 0);
+        && !focusedTextTurn;
 
     const starterChipSx = {
         height: 24, borderRadius: '6px', fontSize: textVar.xs,
@@ -2681,6 +2684,11 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
                     '& .MuiCollapse-wrapperInner': { display: 'flex', alignItems: 'center', gap: 0.5, flexWrap: 'nowrap', minWidth: 0 },
                 }}
             >
+                <StarterChip
+                    label={'✨ ' + t('chartRec.findInsights')}
+                    onClick={() => submitChat(t('chartRec.findInsightsPrompt'))}
+                    sx={{ ...starterChipSx, color: 'primary.main', flexShrink: 0 }}
+                />
                 {starterLoading
                     ? <CircularProgress size={13} thickness={5} sx={{ color: 'text.disabled', mx: 0.5 }} />
                     : (focusedStarterEntry?.questions ?? []).map((q, i) => (

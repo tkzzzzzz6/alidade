@@ -419,6 +419,7 @@
     "close": "Close canvas"
   },
   "dataThread": {
+    "findingInsights": "Scanning for what stands out {{tables}}",
     "savingDefinition": "Remembering what “{{term}}” means",
     "definitionsApplied": "Using saved definitions: {{items}}",
     "title": "Data Threads",
@@ -565,6 +566,8 @@
     "hidePanel": "hide concept panel"
   },
   "chartRec": {
+    "findInsights": "Find insights",
+    "findInsightsPrompt": "Scan this data automatically and show me what stands out.",
     "generateFromDescription": "Generate chart from description",
     "getSomeIdeas": "Get some ideas!",
     "ideasPrompt": "ideas?",

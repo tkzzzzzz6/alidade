@@ -448,6 +448,7 @@ class AnalystGraph:
                 "table_names": tool_args.get("table_names") if tool_name == "inspect_source_data" else None,
                 "skill": tool_args.get("name") if tool_name == "load_skill" else None,
                 "term": tool_args.get("term") if tool_name == "save_definition" else None,
+                **({"table_names": tool_args.get("table_names")} if tool_name == "find_insights" else {}),
             })
             t0 = time.time()
             status = "ok"
@@ -466,6 +467,9 @@ class AnalystGraph:
                 tool_content = planning.summarize_plan(plan)
                 write({"type": "plan", "steps": [dict(x) for x in plan]})
                 write({"type": "tool_result", "tool": tool_name, "status": "ok", "stdout": tool_content})
+            elif tool_name == "find_insights":
+                tool_content, status = agent.find_insights(tool_args, input_tables, write)
+                write({"type": "tool_result", "tool": tool_name, "status": status, "stdout": tool_content})
             elif tool_name == "save_definition":
                 tool_content, status = agent.save_definition(
                     tool_args, state.get("user_question", ""), input_tables)

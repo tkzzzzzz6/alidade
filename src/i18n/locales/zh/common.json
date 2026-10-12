@@ -419,6 +419,7 @@
     "close": "关闭画布"
   },
   "dataThread": {
+    "findingInsights": "扫描数据中值得关注的规律 {{tables}}",
     "savingDefinition": "记住口径：{{term}}",
     "definitionsApplied": "沿用已保存的口径：{{items}}",
     "title": "数据线程",
@@ -620,6 +621,8 @@
     "hidePanel": "隐藏概念面板"
   },
   "chartRec": {
+    "findInsights": "自动发现洞察",
+    "findInsightsPrompt": "自动扫描这份数据，告诉我最值得关注的发现。",
     "generateFromDescription": "根据描述生成图表",
     "getSomeIdeas": "获取一些灵感！",
     "ideasPrompt": "灵感？",
