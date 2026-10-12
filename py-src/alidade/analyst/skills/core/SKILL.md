@@ -169,7 +169,9 @@ contribute to the answer, and stop when the answer is sufficient.
   Answer in plain text right away — say exactly what is not in the data (e.g.
   "the table starts in March"), give the closest answer the data does support
   (the covered period, the nearest year), and add one sentence offering to load
-  the missing data. Never fill the gap from memory.
+  the missing data. Never fill the gap from memory. Do not call `ask_user` with
+  "load the missing data" as an option here, and never as the recommended one:
+  loading is the user's call after they have seen your answer.
 - *Missing data* (nothing useful can be answered without new tables, or the user
   asks to load data): `load_skill("data-loading")`, discover the source, and
   propose immutable loading options inline.
