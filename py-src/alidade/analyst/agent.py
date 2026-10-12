@@ -39,6 +39,7 @@ from alidade.analyst.engine import chart_check
 from alidade.analyst.engine import routing
 from alidade.analyst.engine.execution import CodeExecutor
 from alidade.analyst.engine.graph import RECURSION_LIMIT, AnalystGraph
+from alidade.analyst.engine.trace import RunTrace
 from alidade.analyst.engine.planning import plan_tool, planning_prompt
 from alidade.analyst.engine.prompts import (
     CORE_SKILL,
@@ -190,6 +191,12 @@ class AnalystAgent:
         self.run_ended = threading.Event()
         held: list[dict[str, Any]] = []
         outcome = "aborted"
+        trace = RunTrace(
+            getattr(self.workspace, "user_home", None), run_id, question=user_question,
+            model=getattr(self.client, "model_name", None) or getattr(self.client, "model", ""),
+            fast_model=(getattr(self.fast_client, "model_name", "") if self.fast_client is not None else ""),
+            resumed=resuming,
+        )
 
         rlog.log(
             "session_start",
@@ -242,6 +249,7 @@ class AnalystAgent:
                     for event in stream:
                         if not isinstance(event, dict):
                             continue
+                        trace.observe(event)
                         if event.get("type") in _TERMINAL_EVENTS:
                             held.append(event)
                         else:
@@ -263,6 +271,7 @@ class AnalystAgent:
             yield from held
         finally:
             self.run_ended.set()
+            trace.save(outcome)
             if self.executor is not None:
                 self.executor.close()
             rlog.log(

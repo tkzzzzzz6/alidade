@@ -313,6 +313,10 @@ def _register_blueprints():
     from alidade.routes.knowledge import knowledge_bp
     app.register_blueprint(knowledge_bp)
 
+    # Run traces (what each analyst run did, for the trace viewer)
+    from alidade.routes.traces import traces_bp
+    app.register_blueprint(traces_bp)
+
     # Auto-register all installed data loaders as DataConnector instances.
     # We always run this so the connectors blueprint and the built-in
     # 'sample_datasets' connector are available; the function itself

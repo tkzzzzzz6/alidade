@@ -34,6 +34,7 @@ is kept in [docs/upstream/CHANGELOG.md](docs/upstream/CHANGELOG.md).
 - Harder questions: dirty data (string amounts, mixed date formats, duplicates), multi-table joins, and questions that must be clarified first; numeric and multi-part answer checks.
 
 ### Interface
+- **Run traces**: every run records its model calls (model, routing tier and why, time, tokens and cache hits), tool calls, charts, chart checks and sub-agents; a timeline viewer in the toolbar shows them.
 - The chat box stays usable while the agent runs: a one-line status shows what it is doing, and messages typed meanwhile wait in an editable queue.
 - Question panel shows the agent's context and tags the recommended option.
 - Fixed: running the agent in an empty workspace (no source tables).

@@ -86,6 +86,8 @@ import dfLogo from '../assets/alidade-logo.svg';
 import { AnvilLoader } from '../components/AnvilLoader';
 import { ModelSelectionButton } from '../views/ModelSelectionDialog';
 import { LogViewerDialog } from '../views/LogViewerDialog';
+import { RunTraceDialog } from '../views/RunTraceDialog';
+import TimelineOutlinedIcon from '@mui/icons-material/TimelineOutlined';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import DownloadIcon from '@mui/icons-material/Download';
@@ -1081,6 +1083,7 @@ const AppShell: FC = () => {
     const toolbarRef = useRef<HTMLDivElement | null>(null);
     const isCompactToolbar = useIsNarrow(toolbarRef, COMPACT_TOOLBAR_WIDTH);
     const [settingsOpen, setSettingsOpen] = useState(false);
+    const [tracesOpen, setTracesOpen] = useState(false);
     const [logsOpen, setLogsOpen] = useState(false);
     const exitSession = useExitSession();
     const inSession = isAppPage && !!activeWorkspace;
@@ -1166,6 +1169,7 @@ const AppShell: FC = () => {
                                 {serverConfig.IS_LOCAL_MODE && (
                                     <LogViewerDialog open={logsOpen} onOpenChange={setLogsOpen} hideTrigger />
                                 )}
+                                <RunTraceDialog open={tracesOpen} onOpenChange={setTracesOpen} hideTrigger />
                                 <ToolbarOverflowMenu
                                     items={[
                                         {
@@ -1173,6 +1177,12 @@ const AppShell: FC = () => {
                                             label: t('app.settings'),
                                             icon: <SettingsOutlinedIcon fontSize="small" />,
                                             onClick: () => setSettingsOpen(true),
+                                        },
+                                        {
+                                            key: 'traces',
+                                            label: t('trace.open'),
+                                            icon: <TimelineOutlinedIcon fontSize="small" />,
+                                            onClick: () => setTracesOpen(true),
                                         },
                                         ...(serverConfig.IS_LOCAL_MODE ? [{
                                             key: 'logs',
@@ -1197,6 +1207,7 @@ const AppShell: FC = () => {
                                 <LanguageSwitcher />
                                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }}>
                                     <ConfigDialog />
+                                    <RunTraceDialog />
                                     {serverConfig.IS_LOCAL_MODE && <LogViewerDialog />}
                                 </Box>
                                 {inSession && (

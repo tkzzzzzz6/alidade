@@ -71,6 +71,9 @@ export function getUrls() {
         LOGS_INFO: `/api/logs/info`,
         LOGS_TAIL: `/api/logs/tail`,
         LOGS_DOWNLOAD: `/api/logs/download`,
+
+        // Run traces (what each analyst run did)
+        TRACES: `/api/traces`,
         MODEL_ENDPOINTS: `/api/model-endpoints`,
 
         // Session management
