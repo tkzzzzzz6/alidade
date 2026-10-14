@@ -123,6 +123,17 @@ export interface SubagentRecord {
     /** the sub-agent's closing summary (3–5 lines with its numbers) */
     findings?: string;
     error?: string;
+    /** which fan-out round (1, 2, …) and when the step was handed out (epoch ms) */
+    round?: number;
+    queued_at?: number;
+    /** how many sub-agents could run at once in that run */
+    max_parallel?: number;
+    /** the sub-agent's own model calls, tokens and tool calls */
+    calls?: number;
+    prompt_tokens?: number;
+    cached_tokens?: number;
+    completion_tokens?: number;
+    tool_calls?: number;
 }
 
 export interface AgentPlanStep {
@@ -176,6 +187,16 @@ export type ThreadNode = DraftNode | DictTable | LoadedTableNode;
  * Deleting either uses the same generic artifact path. Delegate is not a turn;
  * a hand-off is an agent action handled directly.
  */
+/** Where a 👍 / 👎 on an answer goes (the run's LangSmith trace). */
+export interface AnswerFeedback {
+    traceId: string;
+    /** Server-issued proof that this user may rate this trace. */
+    token: string;
+    /** 1 = 👍, 0 = 👎, null/undefined = not rated. */
+    score?: 0 | 1 | null;
+    comment?: string;
+}
+
 export interface TextTurn {
     kind: 'text';
     id: string;
@@ -214,6 +235,8 @@ export interface TextTurn {
      *  only (focusing the turn keeps this chart on the canvas). NOT positioning. */
     sourceChartId?: string;
     actionId?: string;
+    /** Set when the run was traced to LangSmith: the answer can be rated. */
+    feedback?: AnswerFeedback;
     /**
      * Resume token — set iff the emitting event paused a run (`interact`). The
      * run is checkpointed server-side; answering the turn resumes it by id.

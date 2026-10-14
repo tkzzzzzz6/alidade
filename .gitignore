@@ -425,3 +425,5 @@ package-lock.json
 
 # Evaluation outputs (per-question logs can be large)
 eval/results/*/logs/
+
+.claude/skills/live-panel/

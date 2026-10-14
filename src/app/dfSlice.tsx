@@ -2778,4 +2778,4 @@ export const getDataFieldItems = (baseTable: DictTable): FieldItem[] => {
 
 // Action creators are generated for each case reducer function
 export const dfActions = alidadeSlice.actions;
-export const alidadeReducer = alidadeSlice.reducer;
+export const alidadeReducer = alidadeSlice.reducer;

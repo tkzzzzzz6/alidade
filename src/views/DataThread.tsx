@@ -534,6 +534,9 @@ let SingleThreadGroupView: FC<{
     usedIntermediateTableIds: string[],
     globalHighlightedTableIds: string[],
     focusedThreadLeafId?: string, // The leaf table ID of the thread containing the focused table
+    // Folded away: only the header (with a one-line summary) is shown.
+    folded?: boolean,
+    onToggleFolded?: () => void,
     sx?: SxProps
 }> = function ({
     threadLabel,
@@ -546,6 +549,8 @@ let SingleThreadGroupView: FC<{
     usedIntermediateTableIds,
     globalHighlightedTableIds,
     focusedThreadLeafId,
+    folded = false,
+    onToggleFolded,
     sx
 }) {
 
@@ -1863,6 +1868,21 @@ let SingleThreadGroupView: FC<{
     const hasHighlighting = highlightedTableIds.length > 0;
     // Whether the thread header is highlighted (any non-used-table item in this thread is highlighted)
     const headerHL = timelineItems.some(item => item.highlighted && item.type !== 'used-table');
+    // What a folded thread says about itself, so it can still be found
+    const foldSummary = (() => {
+        // one per analysis step: the user's prompt or the instruction it became
+        // (or a bare trigger card when there is no interaction log)
+        const steps = timelineItems.filter(it => (it.type === 'trigger' || it.type === 'leaf-trigger')
+            && (!it.interactionEntry || it.interactionEntry.role === 'prompt' || it.interactionEntry.role === 'instruction'));
+        const asked = steps.map(it => it.interactionEntry).filter((e): e is InteractionEntry => !!e);
+        const last = asked[asked.length - 1];
+        return {
+            questions: steps.length,
+            charts: timelineItems.filter(it => it.type === 'chart' && it.chartType).length,
+            running: timelineItems.some(it => it.isRunning),
+            lastQuestion: (last?.displayContent || last?.content || '').replace(/\s+/g, ' ').trim(),
+        };
+    })();
 
     const renderTimelineItem = (item: typeof timelineItems[0], index: number, isLast: boolean, nextHighlighted: boolean) => {
         const isTrigger = item.type === 'trigger' || item.type === 'leaf-trigger';
@@ -2100,14 +2120,41 @@ let SingleThreadGroupView: FC<{
                         }} />
                         <Box sx={{ width: 0, flex: '1 1 0', minHeight: 10, borderLeft: `${connWidth} ${connStyle} ${connColor}` }} />
                     </Box>
-                    <Box sx={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', pl: 0.5, gap: 0.5 }}>
+                    <Box
+                        role={onToggleFolded ? 'button' : undefined}
+                        tabIndex={onToggleFolded ? 0 : undefined}
+                        aria-expanded={onToggleFolded ? !folded : undefined}
+                        aria-label={onToggleFolded ? t(folded ? 'dataThread.expandThread' : 'dataThread.collapseThread', { label: threadLabel }) : undefined}
+                        data-testid={onToggleFolded ? 'thread-fold-toggle' : undefined}
+                        onClick={onToggleFolded}
+                        onKeyDown={onToggleFolded ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggleFolded(); } } : undefined}
+                        sx={{
+                            flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', pl: 0.5, gap: 0.5,
+                            borderRadius: '4px',
+                            ...(onToggleFolded ? { cursor: 'pointer', '&:hover': { bgcolor: 'action.hover' }, '&:hover .thread-fold-chevron': { color: 'text.secondary' } } : {}),
+                        }}>
                         <Typography sx={{ 
                             fontSize: textVar.xs, fontWeight: 700, 
                             textTransform: 'uppercase', letterSpacing: '0.02em',
                             color: headerHL ? hlColor : 'rgba(0,0,0,0.55)', 
+                            flexShrink: 0,
                         }}>
                             {threadLabel}
                         </Typography>
+                        {folded && (
+                            <Typography noWrap sx={{ fontSize: textVar.xxs, color: 'text.disabled', minWidth: 0 }}>
+                                {t('dataThread.foldedSummary', { q: foldSummary.questions, c: foldSummary.charts })}
+                            </Typography>
+                        )}
+                        {folded && foldSummary.running && (
+                            <Box aria-label={t('dataThread.foldedRunning')} sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: 'primary.main', flexShrink: 0 }} />
+                        )}
+                        {onToggleFolded && (
+                            <ChevronRightIcon className="thread-fold-chevron" sx={{
+                                ml: 'auto', flexShrink: 0, fontSize: iconVar.sm, color: 'text.disabled',
+                                transition: 'transform 0.15s', transform: folded ? 'none' : 'rotate(90deg)',
+                            }} />
+                        )}
                     </Box>
                 </Box>
                 );
@@ -2140,8 +2187,20 @@ let SingleThreadGroupView: FC<{
                     </Box>
                 );
             })()}
-            {timelineItems.map((item, index) => renderTimelineItem(item, index, index === timelineItems.length - 1, timelineItems[index + 1]?.highlighted ?? false))}
-            {hasContinuationBelow && (() => {
+            {folded && foldSummary.lastQuestion && (
+                <Box sx={{ display: 'flex', flexDirection: 'row' }}>
+                    <Box sx={{ width: TIMELINE_WIDTH, flexShrink: 0 }} />
+                    <Typography title={foldSummary.lastQuestion} onClick={onToggleFolded} sx={{
+                        flex: 1, minWidth: 0, pl: 0.5, pb: 0.25, cursor: onToggleFolded ? 'pointer' : 'default',
+                        fontSize: textVar.xxs, color: 'text.secondary',
+                        display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-word',
+                    }}>
+                        {t('dataThread.foldedLast', { q: foldSummary.lastQuestion })}
+                    </Typography>
+                </Box>
+            )}
+            {!folded && timelineItems.map((item, index) => renderTimelineItem(item, index, index === timelineItems.length - 1, timelineItems[index + 1]?.highlighted ?? false))}
+            {!folded && hasContinuationBelow && (() => {
                 return (
                     <Box sx={{ display: 'flex', flexDirection: 'row' }}>
                         <Box sx={{
@@ -2274,6 +2333,25 @@ const LAYOUT_TABLE_HEIGHT = 28 + 8;     // table card + row padding
 const LAYOUT_ENTRY_HEIGHT = 38;         // interaction entry — empirical ~1.5-line average incl. row padding
 const LAYOUT_CHART_HEIGHT = 90 + 8;     // chart card (~70-110) + row padding
 const LAYOUT_THREAD_OVERHEAD = 52;      // header divider + thread padding
+
+const FOLDED_THREADS_KEY = 'df_folded_threads';
+
+function readFoldedThreads(): Set<string> {
+    try {
+        const raw = localStorage.getItem(FOLDED_THREADS_KEY);
+        const list = raw ? JSON.parse(raw) : [];
+        return new Set(Array.isArray(list) ? list.filter((x: unknown) => typeof x === 'string') : []);
+    } catch {
+        return new Set();
+    }
+}
+
+function writeFoldedThreads(keys: Set<string>): void {
+    try {
+        // keys hold table ids, so a list only grows with real threads; keep the newest
+        localStorage.setItem(FOLDED_THREADS_KEY, JSON.stringify([...keys].slice(-200)));
+    } catch { /* storage unavailable: folding just isn't remembered */ }
+}
 
 function estimateThreadHeight(
     tableCount: number, entryCount: number, chartCount: number
@@ -3039,6 +3117,15 @@ export const DataThread: FC<{sx?: SxProps, centered?: boolean, denseColumns?: bo
         return undefined;
     }, [focusedTableId, leafTables, tables]);
 
+    // Folded threads (just the header + a summary), remembered in this browser
+    const [foldedThreads, setFoldedThreads] = useState<Set<string>>(readFoldedThreads);
+    const toggleThreadFold = useCallback((key: string) => setFoldedThreads(prev => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key); else next.add(key);
+        writeFoldedThreads(next);
+        return next;
+    }), []);
+
     // Conversation that predates any table: the first run of a session that
     // started from a question rather than from data.
     const rootlessTurns = useMemo(
@@ -3076,6 +3163,7 @@ export const DataThread: FC<{sx?: SxProps, centered?: boolean, denseColumns?: bo
         hasContinuationBelow?: boolean;   // true → render "↓ continues below" footer
         isRootless?: boolean;             // true → thread rooted at the conversation, not a table
         usedTableIds?: string[];
+        threadKey?: string;               // shared by a thread's segments: what folding is keyed by
     };
     let allThreadEntries: ThreadEntry[] = [];
 
@@ -3097,6 +3185,7 @@ export const DataThread: FC<{sx?: SxProps, centered?: boolean, denseColumns?: bo
         realThreadIdx++;
         allThreadEntries.push({
             key: 'rootless-thread',
+            threadKey: 'rootless-thread',
             isRootless: true,
             threadLabel: t('dataThread.threadIndex', { index: String(realThreadIdx) }),
         });
@@ -3157,6 +3246,7 @@ export const DataThread: FC<{sx?: SxProps, centered?: boolean, denseColumns?: bo
         realThreadIdx++;
         allThreadEntries.push({
             key: `source-thread-${st.id}`,
+            threadKey: `source-thread-${st.id}`,
             originTableId: st.id,
             threadLabel: t('dataThread.threadIndex', { index: String(realThreadIdx) }),
         });
@@ -3175,6 +3265,7 @@ export const DataThread: FC<{sx?: SxProps, centered?: boolean, denseColumns?: bo
 
         allThreadEntries.push({
             key: `thread-${lt.id}-${i}`,
+            threadKey: `thread-${groupIdOf(lt)}`,
             leafTable: lt,
             originTableId: originOfHead.get(lt.id),
             threadLabel: isFirst ? t('dataThread.threadIndex', { index: String(realThreadIdx) }) : undefined,
@@ -3263,6 +3354,28 @@ export const DataThread: FC<{sx?: SxProps, centered?: boolean, denseColumns?: bo
         }
     }
 
+    // A folded thread is a header and a summary; its continuation segments take no room.
+    const isFolded = (e: ThreadEntry) => !!e.threadKey && foldedThreads.has(e.threadKey);
+    allThreadHeights = allThreadHeights.map((h, i) => {
+        const e = allThreadEntries[i];
+        if (!isFolded(e)) return h;
+        return e.isSplitThread ? 0 : estimateThreadHeight(0, 1, 0);
+    });
+    // Focusing something inside a folded thread (a chart on the canvas, a
+    // table) opens the thread again, so the selection is visible.
+    const focusedThreadKey = allThreadEntries.find(e =>
+        !!focusedThreadLeafId && (e.leafTable?.id === focusedThreadLeafId || e.originTableId === focusedThreadLeafId))?.threadKey;
+    useEffect(() => {
+        if (!focusedThreadKey) return;
+        setFoldedThreads(prev => {
+            if (!prev.has(focusedThreadKey)) return prev;
+            const next = new Set(prev);
+            next.delete(focusedThreadKey);
+            writeFoldedThreads(next);
+            return next;
+        });
+    }, [focusedThreadKey, focusedTableId]);
+
     // (design-docs/42) No per-turn home assignment: a table's attached content
     // (conversation turns + live run state) renders at its single real card
     // card — the first entry that mentions it. Columns come purely from the
@@ -3307,11 +3420,16 @@ export const DataThread: FC<{sx?: SxProps, centered?: boolean, denseColumns?: bo
                 sx={entrySx} />;
         }
 
+        const folded = isFolded(entry);
+        if (folded && entry.isSplitThread) return null;   // folded with its head
+        const threadKey = entry.threadKey;
         return <SingleThreadGroupView
             key={entry.key}
+            folded={folded}
+            onToggleFolded={threadKey && entry.threadLabel ? () => toggleThreadFold(threadKey) : undefined}
             threadLabel={entry.threadLabel}
             isSplitThread={entry.isSplitThread}
-            hasContinuationBelow={entry.hasContinuationBelow}
+            hasContinuationBelow={entry.hasContinuationBelow && !folded}
             isRootless={entry.isRootless}
             originTableId={entry.originTableId}
             leafTable={entry.leafTable}

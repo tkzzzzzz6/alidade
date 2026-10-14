@@ -294,6 +294,15 @@ def test_multi_and_subagent_metrics():
     assert m["subagents_total"] == 2 and m["subagent_fail_rate"] == 0.5
     old = report.metrics([_run(category="multistep")])          # records from before sub-agents
     assert old["subagent_run_rate"] is None and old["subagent_fail_rate"] is None
+    assert m["avg_subagent_calls"] is None                     # older records: not measured
+
+
+def test_per_subagent_usage_metrics():
+    sub = lambda d, calls, out, prompt, cached: {"step_id": "s", "status": "success", "duration_s": d, "calls": calls,
+                                                 "completion_tokens": out, "prompt_tokens": prompt, "cached_tokens": cached}
+    m = report.metrics([_run(category="multiangle", subagents=[sub(10, 2, 400, 9000, 8000), sub(20, 4, 800, 11000, 8000)])])
+    assert m["avg_subagent_seconds"] == 15 and m["avg_subagent_calls"] == 3
+    assert m["avg_subagent_output_tokens"] == 600 and m["avg_subagent_uncached_input"] == 2000
 
 
 def test_plan_parallel_width():

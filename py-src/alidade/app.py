@@ -45,6 +45,9 @@ APP_ROOT = Path(Path(__file__).parent).absolute()
 load_dotenv(os.path.join(APP_ROOT, "..", "..", '.env'))
 load_dotenv(os.path.join(APP_ROOT, '.env'))
 
+from alidade import langsmith_tracing  # noqa: E402
+langsmith_tracing.configure()               # ALIDADE_LANGSMITH=1 → LangSmith tracing
+
 # .env files written before the rename use the old variable names (see alidade.legacy).
 from alidade.legacy import apply_legacy_env, default_home  # noqa: E402
 apply_legacy_env()

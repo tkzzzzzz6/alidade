@@ -116,3 +116,30 @@ export function latestActivity(lines: string[], tag: string): string {
     }
     return '';
 }
+
+/**
+ * The plan with one sub-agent event applied to its step's record.
+ *
+ * Steps run as parallel branches, so the backend can't push the whole plan
+ * each time one starts or ends; it sends a `subagent` event instead and the
+ * full plan only once the round is merged. `started` turns the step's record
+ * to running (with its clock); the end event carries the final record. The
+ * step's own checklist status is left to the merged plan.
+ */
+export function applySubagentEvent(plan: AgentPlanStep[], event: any): AgentPlanStep[] {
+    if (!event || !event.step_id || !plan.some(s => s.id === event.step_id)) return plan;
+    return plan.map(step => {
+        if (step.id !== event.step_id) return step;
+        if (event.status === 'started') {
+            return {
+                ...step,
+                subagent: {
+                    ...(step.subagent || {}), status: 'running', run_id: event.run_id ?? step.subagent?.run_id,
+                    started_at: event.started_at, timeout_s: event.timeout_s,
+                },
+            };
+        }
+        const { type: _type, step_id: _sid, ...record } = event;
+        return { ...step, subagent: { ...(step.subagent || {}), ...record } };
+    });
+}

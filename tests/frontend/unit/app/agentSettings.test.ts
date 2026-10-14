@@ -9,7 +9,7 @@ import {
 import { alidadeReducer, dfActions } from '../../../../src/app/dfSlice';
 
 describe('agent settings', () => {
-    beforeEach(() => apiRequest.mockReset());
+    beforeEach(() => { apiRequest.mockReset(); });
 
     it('sends only what the user set, in wire names, clamped', () => {
         expect(toRequestSettings(undefined)).toBeUndefined();

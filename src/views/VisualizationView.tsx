@@ -83,6 +83,7 @@ import 'prismjs/themes/prism.css'; //Example style, you can use another
 import { useTranslation } from 'react-i18next';
 
 import { ChatDialog } from './ChatDialog';
+import { DispatchCanvasGate } from './DispatchCanvas';
 import { EncodingShelfCard } from './EncodingShelfCard';
 import { ChartQuickConfig } from './ChartQuickConfig';
 import { ChartVariantStrip } from './ChartVariantStrip';
@@ -1758,7 +1759,12 @@ const TableActionDock: FC<{
     );
 };
 
-export const VisualizationViewFC: FC<VisPanelProps> = function VisualizationView({ }) {
+/** The canvas: charts and tables, or — while sub-agents work — the dispatch panel. */
+export const VisualizationViewFC: FC<VisPanelProps> = function VisualizationView(props) {
+    return <DispatchCanvasGate><ChartCanvasFC {...props} /></DispatchCanvasGate>;
+};
+
+const ChartCanvasFC: FC<VisPanelProps> = function ChartCanvas({ }) {
 
     const { t } = useTranslation();
     let allCharts = useSelector(dfSelectors.getAllCharts);

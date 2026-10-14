@@ -30,7 +30,7 @@ import { streamRequest, apiRequest } from '../app/apiClient';
 import { getErrorMessage } from '../app/errorCodes';
 import { Chart, ClarificationResponse, DictTable, FieldItem, createDictTable, InteractionEntry, computeInsightKey, TextTurn, TableSemanticsInfo, ROOTLESS_THREAD_ID, AgentPlanStep, ChartCheckIssue } from "../components/ComponentType";
 import { toRequestSettings } from '../app/agentSettings';
-import { PerStep, chartLabel, lineTag, markToolDone, stepNumber, tagLine, takeLinesFor } from './subagentEvents';
+import { PerStep, applySubagentEvent, chartLabel, lineTag, markToolDone, stepNumber, tagLine, takeLinesFor } from './subagentEvents';
 import { normalizeClarifyEvent, formatClarificationResponses } from '../app/clarification';
 import { parseDataOperation } from '../dataOperations/models';
 import { buildDictTableFromWorkspace } from '../app/tableThunks';
@@ -48,6 +48,10 @@ import { borderColor, transition, conversationWidth } from '../app/tokens';
 import { useTranslation } from 'react-i18next';
 import { shouldAutoFocusGeneratedChart } from '../app/agentInteractionPolicy';
 import { ClarificationPanel, ExplanationPanel } from './AgentPausePanel';
+import { AnswerFeedbackBar } from './AnswerFeedbackBar';
+import { DispatchReplayButton } from './DispatchCanvas';
+import { canReplay } from '../app/dispatchView';
+import { feedbackFromEvent } from '../app/answerFeedback';
 import { AgentStatusLine, QueuedMessageList } from './AgentRunStatus';
 import { enqueue, nextQueueAction, QueuedMessage, removeQueued, RunOutcome, updateQueued } from '../app/messageQueue';
 import { CARD_WIDTH } from './threadLayout';
@@ -1208,6 +1212,12 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
                 if (currentDraftId) {
                     dispatch(dfActions.updateDraftRunningPlan({ draftId: currentDraftId, plan: thinkingSteps.join(STEP_SEP) }));
                 }
+                // the checklist's clock / stop button / findings for this step
+                const next = applySubagentEvent(agentPlan, result);
+                if (next !== agentPlan) {
+                    agentPlan = next;
+                    pushAgentPlan();
+                }
             }
 
             // ── chart_check: rule-based self-check of a chart ──
@@ -1628,6 +1638,8 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
                             ? { sourceChartId: runSourceChartIdRef.current }
                             : {}),
                         actionId,
+                        // traced to LangSmith: the answer can be rated 👍 / 👎
+                        ...(feedbackFromEvent(result) ? { feedback: feedbackFromEvent(result) } : {}),
                         // A completed run is not resumable (its checkpoint is
                         // gone); the plan is kept as the record of the run.
                         ...(agentPlan.length > 0 ? { agentPlan } : {}),
@@ -2277,6 +2289,16 @@ export const SimpleChartRecBox: FC<{ onInputFocus?: () => void }> = function ({ 
                         ].filter(Boolean).join('\n\n')}
                         onClose={() => closeTextTurn()}
                         onDelete={() => dispatch(dfActions.removeTextTurn(focusedTextTurn.id))}
+                        footer={focusedTextTurn.textKind !== 'explain' ? undefined
+                            : focusedTextTurn.feedback
+                                ? <AnswerFeedbackBar key={focusedTextTurn.id} turnId={focusedTextTurn.id}
+                                                     feedback={focusedTextTurn.feedback}
+                                                     extra={<DispatchReplayButton turnId={focusedTextTurn.id} plan={focusedTextTurn.agentPlan} />} />
+                                : canReplay(focusedTextTurn.agentPlan)
+                                    ? <Box sx={{ pl: '20px', pr: '8px', pb: '6px' }}>
+                                          <DispatchReplayButton turnId={focusedTextTurn.id} plan={focusedTextTurn.agentPlan} />
+                                      </Box>
+                                    : undefined}
                     />
                 )
             )}

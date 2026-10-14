@@ -1184,4 +1184,4 @@ export const AlidadeFC = ({ }) => {
                 )}
             </DndProvider>
         </Box>);
-}
+}

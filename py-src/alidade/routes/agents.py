@@ -480,7 +480,8 @@ def analyst_streaming():
     execution_operation = None
     operation_repository = None
 
-    if resume_run_id is not None and not str(user_question or "").strip():
+    # continue_run: carry on a run that was interrupted mid-way (no reply needed)
+    if resume_run_id is not None and not str(user_question or "").strip() and not content.get("continue_run"):
         return stream_preflight_error(AppError(ErrorCode.INVALID_REQUEST, "user_question is required to resume after interaction"))
 
     if interaction_response is not None:
@@ -652,6 +653,46 @@ def subagent_stop():
         raise AppError(ErrorCode.INVALID_REQUEST, "run_id and step_id are required")
     stopped = subagent_control.stop(identity_id, run_id, step_id)
     return json_ok({"stopped": stopped, "running": subagent_control.running(identity_id, run_id)})
+
+
+@agent_bp.route('/feedback', methods=['POST'])
+def agent_feedback():
+    """Rate an answer: ``{trace_id, feedback_token, score: 1 | 0 | null, comment?}``.
+
+    Sent to LangSmith as ``user_rating`` on the run's trace (see
+    ``alidade.langsmith_tracing``); ``null`` withdraws the rating. Answers only
+    carry a ``trace_id`` when ``ALIDADE_LANGSMITH=1``.
+    """
+    import uuid as _uuid
+
+    from alidade import langsmith_tracing
+
+    identity_id = get_identity_id()
+    if not identity_id:
+        raise AppError(ErrorCode.AUTH_REQUIRED, "Identity ID required")
+    content = request.get_json(silent=True) or {}
+    trace_id = str(content.get("trace_id") or "").strip()
+    score = content.get("score")
+    comment = content.get("comment") or ""
+    try:
+        _uuid.UUID(trace_id)
+    except ValueError:
+        raise AppError(ErrorCode.INVALID_REQUEST, "trace_id must be a UUID")
+    if score not in (0, 1, None) or isinstance(score, bool):
+        raise AppError(ErrorCode.INVALID_REQUEST, "score must be 1, 0 or null")
+    if not isinstance(comment, str) or len(comment) > 2000:
+        raise AppError(ErrorCode.INVALID_REQUEST, "comment must be text of at most 2000 characters")
+    if not langsmith_tracing.enabled():
+        return json_ok({"recorded": False, "reason": "tracing_off"})
+    if not langsmith_tracing.check_feedback_token(trace_id, identity_id,
+                                                   str(content.get("feedback_token") or "")):
+        raise AppError(ErrorCode.ACCESS_DENIED, "This answer cannot be rated")
+    try:
+        action = langsmith_tracing.send_feedback(trace_id, identity_id, score, comment.strip())
+    except Exception as exc:  # noqa: BLE001 — LangSmith unreachable or refused
+        logger.warning("LangSmith feedback failed: %s", type(exc).__name__)
+        raise AppError(ErrorCode.SERVICE_UNAVAILABLE, "Could not send the rating to LangSmith")
+    return json_ok({"recorded": True, "action": action})
 
 
 @agent_bp.route('/code-expl', methods=['GET', 'POST'])

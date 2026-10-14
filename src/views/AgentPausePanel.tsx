@@ -661,6 +661,8 @@ interface ExplanationPanelProps {
     onClose: () => void;
     /** Delete: remove this explanation block from the thread. */
     onDelete: () => void;
+    /** Shown under the answer (e.g. 👍 / 👎). */
+    footer?: ReactNode;
 }
 
 /**
@@ -670,7 +672,7 @@ interface ExplanationPanelProps {
  * but carries no inputs or actions — it's purely "here's what I said",
  * dismissible by the header's delete button or by focusing another item.
  */
-export const ExplanationPanel: FC<ExplanationPanelProps> = ({ content, onClose, onDelete }) => {
+export const ExplanationPanel: FC<ExplanationPanelProps> = ({ content, onClose, onDelete, footer }) => {
     const theme = useTheme();
     const { t } = useTranslation();
 
@@ -695,6 +697,7 @@ export const ExplanationPanel: FC<ExplanationPanelProps> = ({ content, onClose, 
             }}>
                 <CompactMarkdown content={content} color={theme.palette.text.primary} />
             </Box>
+            {footer}
         </AgentPauseShell>
     );
 };

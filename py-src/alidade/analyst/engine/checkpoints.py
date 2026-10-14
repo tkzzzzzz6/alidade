@@ -1,12 +1,16 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Checkpoint storage for paused analyst runs.
+"""Checkpoint storage for paused (and interrupted) analyst runs.
 
-A run is checkpointed only when it stops (``durability="exit"``): when it pauses
-for the user (``ask_user``) the full graph state is saved, and the client resumes
-it later with just the ``run_id``. Completed runs are deleted right away, and
-paused runs nobody came back to are pruned after ``RETENTION_SECONDS``.
+A run is checkpointed after every graph step (``durability="async"``; set
+``ALIDADE_CHECKPOINT_DURABILITY`` to ``exit`` to save only when the run stops,
+or ``sync`` to wait for each save). When a run pauses for the user
+(``ask_user``) the client resumes it later with just the ``run_id``; a run that
+was interrupted mid-way can be continued the same way, and in a sub-agent round
+only the steps that had not finished run again, because each parallel branch's
+result is saved as it lands. Completed runs are deleted right away; runs nobody
+came back to are pruned after ``RETENTION_SECONDS``.
 
 Storage: ``ALIDADE_HOME/agent-checkpoints/<identity>.sqlite`` — one
 small SQLite file per user, so users never share a database and a file can be
@@ -26,6 +30,17 @@ from typing import Iterator
 logger = logging.getLogger(__name__)
 
 RETENTION_SECONDS = 7 * 24 * 3600
+DURABILITY_ENV = "ALIDADE_CHECKPOINT_DURABILITY"
+_DURABILITIES = ("async", "sync", "exit")
+
+
+def durability() -> str:
+    """How often the main graph saves its state (LangGraph ``durability``)."""
+    import os
+    value = os.environ.get(DURABILITY_ENV, "").strip().lower()
+    return value if value in _DURABILITIES else "async"
+
+
 _PRUNE_INTERVAL_SECONDS = 3600
 
 _last_prune: dict[str, float] = {}

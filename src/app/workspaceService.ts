@@ -312,4 +312,4 @@ export function deleteTablesFromWorkspace(tableIds: string[]): void {
 
 export function isWorkspaceReadOnly(workspace: { readOnly?: boolean } | null | undefined): boolean {
     return workspace?.readOnly === true;
-}
+}

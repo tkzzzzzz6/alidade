@@ -76,6 +76,7 @@ export function getUrls() {
         TRACES: `/api/traces`,
         RUN_SETTINGS: `/api/agent/run-settings`,
         SUBAGENT_STOP: `/api/agent/subagent-stop`,
+        AGENT_FEEDBACK: `/api/agent/feedback`,
         MODEL_ENDPOINTS: `/api/model-endpoints`,
 
         // Session management

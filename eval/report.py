@@ -121,6 +121,12 @@ def run_cost(run: dict[str, Any], prices: dict[str, tuple[float, float, float]])
 
 # ── metrics ────────────────────────────────────────────────────────────────
 
+def _avg_of(items: list[dict[str, Any]], key: str) -> float | None:
+    """Mean of ``key`` over the items that have it (None when none do)."""
+    values = [float(i[key]) for i in items if isinstance(i.get(key), (int, float))]
+    return sum(values) / len(values) if values else None
+
+
 def _rate(num: float, den: float) -> float | None:
     return None if not den else num / den
 
@@ -234,6 +240,13 @@ def metrics(runs: list[dict[str, Any]]) -> dict[str, Any]:
                               if any("subagents" in r for r in ran) else None),
         "subagents_total": len(subagents),
         "subagent_fail_rate": _rate(sum(1 for s in subagents if s.get("status") != "success"), len(subagents)),
+        # per sub-agent (older runs did not record these: None)
+        "avg_subagent_seconds": _avg_of(subagents, "duration_s"),
+        "avg_subagent_calls": _avg_of(subagents, "calls"),
+        "avg_subagent_output_tokens": _avg_of(subagents, "completion_tokens"),
+        "avg_subagent_uncached_input": _avg_of(
+            [{"v": s["prompt_tokens"] - (s.get("cached_tokens") or 0)} for s in subagents
+             if s.get("prompt_tokens") is not None], "v"),
         "intent_ok_rate": (_rate(sum(1 for r in sim if r.get("intent_ok")), len(sim)) if sim else None),
         "intent_ok_rate_asked": (_rate(sum(1 for r in sim if r.get("intent_ok") and r.get("asked")),
                                        sum(1 for r in sim if r.get("asked"))) if sim else None),
@@ -337,6 +350,10 @@ ROWS: list[tuple[str, str, Callable[[Any], str], int]] = [
     ("使用子 Agent 的题目比例", "subagent_run_rate", pct, 0),
     ("子 Agent 总数", "subagents_total", cnt, 0),
     ("子 Agent 失败率", "subagent_fail_rate", pct, -1),
+    ("子 Agent 一步的平均耗时（秒）", "avg_subagent_seconds", num, -1),
+    ("子 Agent 一步的平均 LLM 调用数", "avg_subagent_calls", num, -1),
+    ("子 Agent 一步的平均输出 token", "avg_subagent_output_tokens", num, -1),
+    ("子 Agent 一步的平均未命中缓存输入 token", "avg_subagent_uncached_input", num, -1),
     ("结论中检查的数字个数", "numbers_checked", cnt, 0),
     ("结论中找不到出处的数字比例", "unsupported_number_rate", pct, -1),
     ("含找不到出处数字的回答比例", "runs_with_unsupported_rate", pct, -1),

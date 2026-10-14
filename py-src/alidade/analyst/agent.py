@@ -33,6 +33,7 @@ from alidade.agents.context import (
     build_lightweight_table_context,
     build_peripheral_thread_context,
 )
+from alidade import langsmith_tracing
 from alidade.agents.client_utils import Client
 from alidade.analyst.engine.run_settings import RunSettings
 from alidade.analyst.engine import checkpoints
@@ -65,6 +66,17 @@ logger = logging.getLogger(__name__)
 # the run has been checkpointed (or cleaned up), so a client that disconnects
 # as soon as it sees one can never cut the bookkeeping short.
 _TERMINAL_EVENTS = frozenset({"completion", "interact"})
+
+
+def _trace_outputs(held: list[dict[str, Any]], outcome: str) -> dict[str, Any]:
+    """What the LangSmith root shows as the run's output."""
+    out: dict[str, Any] = {"status": outcome}
+    for ev in held:
+        if ev.get("type") == "completion":
+            out["answer"] = (ev.get("content") or {}).get("summary", "")
+        elif ev.get("type") == "interact":
+            out["questions"] = [q.get("text") for q in ev.get("questions") or [] if isinstance(q, dict)]
+    return out
 
 
 def _fast_client_for(client: Any) -> Any:
@@ -185,7 +197,11 @@ class AnalystAgent:
         or ``interact`` (a paused run; it carries ``run_id``).
 
         To resume a paused run pass ``resume_run_id`` and the user's reply as
-        ``user_question``.
+        ``user_question``. The same call continues a run that was interrupted
+        mid-way (the process stopped, a model call crashed): the graph is
+        checkpointed after every step (``ALIDADE_CHECKPOINT_DURABILITY``,
+        default ``async``), so it picks up after the last finished step — in a
+        sub-agent round, only the steps that had not finished are run again.
         """
         from langgraph.types import Command
 
@@ -200,6 +216,7 @@ class AnalystAgent:
         self.run_ended = threading.Event()
         held: list[dict[str, Any]] = []
         outcome = "aborted"
+        ls_root = None                      # LangSmith root run (ALIDADE_LANGSMITH=1 only)
         trace = RunTrace(
             getattr(self.workspace, "user_home", None), run_id, question=user_question,
             model=getattr(self.client, "model_name", None) or getattr(self.client, "model", ""),
@@ -221,7 +238,8 @@ class AnalystAgent:
         try:
             with checkpoints.open_checkpointer(self.identity_id, checkpoint_db_path) as saver:
                 graph = AnalystGraph(self).build().compile(checkpointer=saver)
-                config = {"configurable": {"thread_id": run_id}, "recursion_limit": RECURSION_LIMIT}
+                config: dict[str, Any] = {"configurable": {"thread_id": run_id},
+                                          "recursion_limit": RECURSION_LIMIT}
 
                 if resuming:
                     if not checkpoints.has_run(saver, run_id):
@@ -232,12 +250,15 @@ class AnalystAgent:
                             message_code="agent.runExpired",
                         )
                         return
+                    snapshot = graph.get_state(config)
                     # keep the settings the run started with
-                    saved = (graph.get_state(config).values or {}).get("run_settings")
+                    saved = (snapshot.values or {}).get("run_settings")
                     if isinstance(saved, dict):
                         self.settings = RunSettings().merged(saved)
                     self.executor.open(restore=True)
-                    graph_input: Any = Command(resume=user_question)
+                    waiting = any(getattr(t, "interrupts", None) for t in snapshot.tasks or ())
+                    # paused on ask_user: the reply resumes it; interrupted mid-way: carry on
+                    graph_input: Any = Command(resume=user_question) if waiting else None
                 else:
                     self.executor.open()
                     graph_input = {
@@ -259,9 +280,16 @@ class AnalystAgent:
                 # closing it waits for the running node, so tell running
                 # sub-agents to stop first.
                 trace.segment["settings"] = self.settings.to_dict()
-                stream = graph.stream(graph_input, config, stream_mode="custom", durability="exit")
+                # indexed from the start, so a run interrupted mid-way is pruned like a paused one
+                checkpoints.touch_run(saver, run_id)
+                ls_root = self._start_langsmith_trace(
+                    config, run_id, user_question, input_tables, resuming,
+                    snapshot.values if resuming else None)
+                stream = graph.stream(graph_input, config, stream_mode="custom",
+                                      durability=checkpoints.durability())
+                events = langsmith_tracing.attach(stream, ls_root)
                 try:
-                    for event in stream:
+                    for event in events:
                         if not isinstance(event, dict):
                             continue
                         trace.observe(event)
@@ -271,6 +299,7 @@ class AnalystAgent:
                             yield event
                 except GeneratorExit:
                     self.run_ended.set()
+                    events.close()
                     stream.close()
                     raise
 
@@ -283,9 +312,17 @@ class AnalystAgent:
                     outcome = snapshot.values.get("status") or "success"
                     checkpoints.forget_run(saver, run_id)
                     self.executor.close(discard_saved=True)
+            if ls_root is not None:             # the answer's 👍/👎 goes to this trace
+                tid = langsmith_tracing.trace_id(ls_root)
+                for ev in held:
+                    ev["trace_id"] = tid
+                    ev["feedback_token"] = langsmith_tracing.feedback_token(tid, self.identity_id)
             yield from held
         finally:
             self.run_ended.set()
+            if ls_root is not None:
+                langsmith_tracing.end_trace(ls_root, outputs=_trace_outputs(held, outcome),
+                                            error=None if outcome in ("success", "paused") else outcome)
             trace.save(outcome)
             if self.executor is not None:
                 self.executor.close()
@@ -296,6 +333,31 @@ class AnalystAgent:
                 total_latency_ms=int((time.time() - started) * 1000),
             )
             rlog.close()
+
+    def _start_langsmith_trace(self, config: dict[str, Any], run_id: str, user_question: str,
+                               input_tables: list[dict[str, Any]], resuming: bool,
+                               saved: dict[str, Any] | None):
+        """The run's LangSmith root (question in, answer out); ``None`` when off.
+
+        The graph runs under it as "graph"; ``thread_id`` = ``run_id`` puts a
+        paused run and its resume in one thread in LangSmith.
+        """
+        if not langsmith_tracing.configure():
+            return None
+        meta = {"thread_id": run_id, "alidade_run_id": run_id,
+                "model": getattr(self.client, "model", None), "resumed": resuming,
+                "subagents": self.settings.subagents}
+        langsmith_tracing.run_config(config, "graph", meta)
+        saved = saved or {}
+        tables = input_tables or saved.get("input_tables") or []
+        inputs: dict[str, Any] = {
+            "question": saved.get("user_question", user_question) if resuming else user_question,
+            "tables": [t.get("name", "") for t in tables if isinstance(t, dict)],
+        }
+        if resuming:
+            inputs["reply"] = user_question
+        return langsmith_tracing.start_trace("alidade analyst", inputs, meta,
+                                             ["resumed"] if resuming else None)
 
     # ==================================================================
     # Skills: loading, gating, dispatch

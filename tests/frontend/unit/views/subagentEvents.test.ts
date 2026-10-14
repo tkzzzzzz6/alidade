@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-    latestActivity,
+    applySubagentEvent, latestActivity,
     PerStep, chartLabel, lineBelongsTo, lineTag, markToolDone, parallelSteps, stepNumber, tagLine, takeLinesFor,
 } from '../../../../src/views/subagentEvents';
 import { AgentPlanStep } from '../../../../src/components/ComponentType';
@@ -80,5 +80,35 @@ describe('subagentEvents', () => {
         expect(latestActivity(lines, '[Step 2] ')).toBe('run code B');
         expect(latestActivity(lines, '[Step 3] ')).toBe('');
         expect(latestActivity(lines, '')).toBe('');
+    });
+});
+
+describe('applySubagentEvent', () => {
+    const queued: AgentPlanStep[] = plan.map(s => s.id === 's2'
+        ? { ...s, subagent: { status: 'queued', run_id: 'r1' } } : s);
+
+    it('marks a started step as running with its clock', () => {
+        const next = applySubagentEvent(queued, {
+            type: 'subagent', step_id: 's2', status: 'started', run_id: 'r1', started_at: 1000, timeout_s: 180,
+        });
+        expect(next[1].subagent).toEqual({ status: 'running', run_id: 'r1', started_at: 1000, timeout_s: 180 });
+        expect(next[1].status).toBe('in_progress');
+        expect(next[0]).toBe(queued[0]);
+    });
+
+    it('takes the final record from the end event', () => {
+        const running = applySubagentEvent(queued, { type: 'subagent', step_id: 's2', status: 'started', started_at: 1000, timeout_s: 180 });
+        const done = applySubagentEvent(running, {
+            type: 'subagent', step_id: 's2', status: 'success', run_id: 'r1', started_at: 1000,
+            duration_s: 12.5, charts: 1, chart_titles: ['Churn by month'], findings: 'Churn fell 3%.',
+        });
+        expect(done[1].subagent).toMatchObject({ status: 'success', duration_s: 12.5, findings: 'Churn fell 3%.', timeout_s: 180 });
+        expect(done[1].subagent).not.toHaveProperty('type');
+        expect(done[1].subagent).not.toHaveProperty('step_id');
+    });
+
+    it('leaves the plan alone for unknown steps', () => {
+        expect(applySubagentEvent(queued, { type: 'subagent', step_id: 'zz', status: 'started' })).toBe(queued);
+        expect(applySubagentEvent(queued, { type: 'subagent', status: 'started' })).toBe(queued);
     });
 });

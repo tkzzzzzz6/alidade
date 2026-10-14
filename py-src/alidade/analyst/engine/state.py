@@ -6,12 +6,21 @@
 Everything here is plain JSON-compatible data so it checkpoints cleanly.
 Live objects (LLM client, workspace, sandbox session) live on the runtime,
 never in state. Nodes return *replacement* values for the keys they change;
-there are no reducers, so a node that edits ``messages`` returns a new list.
+the one reducer is ``subagent_results``, which parallel sub-agent branches
+(LangGraph ``Send``) append to and the merge node clears.
 """
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
+
+
+def collect_results(current: list[dict[str, Any]] | None,
+                    update: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Reducer for ``subagent_results``: branches append; ``None`` clears."""
+    if update is None:
+        return []
+    return [*(current or []), *update]
 
 
 class PendingAction(TypedDict, total=False):
@@ -56,6 +65,8 @@ class AnalystState(TypedDict, total=False):
 
     # ── parallel sub-agents (ALIDADE_SUBAGENTS=1) ──────────────────────
     after_tools: str            # "agent", or "subagents" when a new plan can be fanned out
+    subagent_tasks: list[dict[str, Any]]   # this round's tasks, one Send branch each
+    subagent_results: Annotated[list[dict[str, Any]], collect_results]   # one per finished branch
     dispatched_steps: list[str]  # plan step ids already handed to sub-agents
     subagent_rounds: int        # fan-out rounds so far (bounded)
     run_settings: dict[str, Any]  # per-run agent settings (see run_settings.py); kept for resumes

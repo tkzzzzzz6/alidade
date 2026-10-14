@@ -69,6 +69,7 @@ alidade
 | `ALIDADE_HOME` | 数据目录，默认 `~/.alidade`（会话、工作区、日志、检查点） |
 | `ALIDADE_AGENT_CONTEXT_BUDGET` | 上下文压缩的 token 预算，默认 60000 |
 | `SANDBOX` | 代码执行方式：`local`（默认）或 `docker` |
+| `ALIDADE_LANGSMITH` | 设为 `1` 并配好 `LANGSMITH_API_KEY` 后，把 LangGraph 节点和每次模型调用上报到 LangSmith，默认关闭，见 [docs/langsmith.md](docs/langsmith.md) |
 
 ## 架构
 

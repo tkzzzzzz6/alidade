@@ -739,7 +739,8 @@ def score(q, events, asks, usage, duration, error, client, args) -> dict[str, An
 
     completed = status == "success" and error is None
     chart_ok = (len(charts) >= int(q.get("min_charts", 1))) if q.get("chart") else True
-    subagents = [{k: e.get(k) for k in ("step_id", "status", "duration_s", "tokens")}
+    subagents = [{k: e.get(k) for k in ("step_id", "status", "duration_s", "round", "calls", "tool_calls",
+                                        "prompt_tokens", "cached_tokens", "completion_tokens")}
                  for e in events if e.get("type") == "subagent" and e.get("status") != "started"]
     first_ask = next((i for i, e in enumerate(events) if e.get("type") == "interact"), None)
     charts_before_ask = sum(1 for e in (events if first_ask is None else events[:first_ask])

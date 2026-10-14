@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
+from langgraph.types import Send, interrupt
 
 from alidade.agents.context import handle_inspect_source_data
 from alidade.analyst.engine import compression, llm, planning, routing
@@ -109,14 +109,19 @@ class AnalystGraph:
         g.add_node("tools", self.tools_step)
         g.add_node("act", self.act_step)
         g.add_node("await_user", self.await_user)
-        g.add_node("subagents", self.subagents_step)
+        g.add_node("dispatch", self.dispatch_step)
+        g.add_node("subagent", self.subagent_branch)
+        g.add_node("merge", self.merge_step)
         g.add_node("finish", self.finish)
 
         g.add_edge(START, "prepare")
         g.add_edge("prepare", "agent")
         g.add_conditional_edges("agent", _route, ["tools", "act", "agent", "finish"])
-        g.add_conditional_edges("tools", _route_after_tools, ["agent", "subagents"])
-        g.add_conditional_edges("subagents", _route_after_tools, ["agent", "subagents"])
+        # parallel sub-agents: dispatch -> Send("subagent", task) per step -> merge
+        g.add_conditional_edges("tools", _route_after_tools, ["agent", "dispatch"])
+        g.add_conditional_edges("dispatch", _send_subtasks, ["subagent"])
+        g.add_edge("subagent", "merge")
+        g.add_conditional_edges("merge", _route_after_tools, ["agent", "dispatch"])
         g.add_conditional_edges("act", _route, ["agent", "await_user", "finish"])
         g.add_edge("await_user", "agent")
         g.add_edge("finish", END)
@@ -562,126 +567,124 @@ class AnalystGraph:
             return False
         return len(planning.startable_steps(plan, state.get("dispatched_steps") or [])) >= 2
 
-    def subagents_step(self, state: AnalystState) -> dict[str, Any]:
-        """Hand every step that can start now to its own sub-agent, run them in
-        parallel (bounded), stream their events tagged with ``step_id``, and
-        report what each found back to the main agent.
+    def dispatch_step(self, state: AnalystState) -> dict[str, Any]:
+        """Start a fan-out round: mark the steps that can start now as queued and
+        write one task per step; the ``Send`` edge then gives each its own
+        ``subagent`` branch.
 
-        Each step's sub-agent can be stopped on its own from the UI (see
-        :mod:`.subagent_control`); a step the user stopped is marked skipped
-        and the main agent is told not to redo it. What each sub-agent did is
-        recorded on its plan step (``subagent``), so the checklist can show it
-        live and keep the findings after the run.
+        Each branch's result is saved in the checkpoint as soon as it finishes
+        (``durability="async"``), so a run interrupted mid-round continues with
+        only the unfinished steps.
         """
-        import queue
-        from concurrent.futures import ThreadPoolExecutor
-
-        from alidade.analyst.engine import subagent, subagent_control
-
         agent = self.agent
         settings = agent.settings
         write = _writer()
         run_id = state.get("run_id", "")
-        identity = getattr(agent, "identity_id", None)
-        dispatched = list(state.get("dispatched_steps") or [])
         plan = [dict(s) for s in state.get("plan") or []]
-        batch = planning.startable_steps(plan, dispatched)
+        batch = planning.startable_steps(plan, state.get("dispatched_steps") or [])
         batch_ids = {b["id"] for b in batch}
-        started_ms = int(time.time() * 1000)
+        round_no = int(state.get("subagent_rounds") or 0) + 1
+        queued_ms = int(time.time() * 1000)
         for s in plan:
             if s["id"] in batch_ids:
                 s["status"] = "in_progress"
-                s["subagent"] = {"status": "queued", "run_id": run_id}
+                s["subagent"] = {"status": "queued", "run_id": run_id, "round": round_no, "queued_at": queued_ms,
+                                 "max_parallel": settings.max_parallel}
         write({"type": "plan", "steps": [dict(x) for x in plan]})
-
-        messages = _copy_messages(state.get("messages") or [])
+        messages = state.get("messages") or []
         tasks = [{
             "step_id": b["id"], "title": b["title"], "goal": b.get("goal") or b["title"],
             "user_question": state.get("user_question", ""),
             "user_answers": _user_answers(messages),
+            "lead_checks": _lead_checks(messages),
             "input_tables": state.get("input_tables") or [],
             "parent_run_id": run_id,
             "max_actions": settings.subagent_max_charts,
+            "round": round_no, "queued_at": queued_ms, "max_parallel": settings.max_parallel,
         } for b in batch]
-        events: queue.Queue = queue.Queue()
-        limit = settings.subagent_timeout_s
-        handles = {t["step_id"]: subagent_control.StepHandle() for t in tasks}
-        for sid, handle in handles.items():
-            subagent_control.register(identity, run_id, sid, handle)
-        run_ended = getattr(agent, "run_ended", None)          # the user pressed Stop / went away
+        return {"plan": plan, "subagent_tasks": tasks, "subagent_results": None}
 
-        def run_one(task: dict[str, Any]) -> dict[str, Any]:
-            handle = handles[task["step_id"]]
-            if run_ended is not None and run_ended.is_set():
-                handle.stop(subagent_control.RUN_ENDED)
-            timer = threading.Timer(limit, handle.stop, args=(subagent_control.TIMEOUT,))
-            timer.daemon = True
-            events.put({"type": "subagent", "step_id": task["step_id"], "status": "started",
-                        "title": task["title"], "goal": task["goal"], "run_id": run_id,
-                        "started_at": int(time.time() * 1000), "timeout_s": limit,
-                        "max_charts": task["max_actions"]})
-            timer.start()
-            try:
-                result = subagent.run_subtask(agent, task, events.put, handle.event)
-            finally:
-                timer.cancel()
-            if handle.stopped and result["status"] == "stopped":
-                result["status"] = {subagent_control.USER: "cancelled",
-                                    subagent_control.TIMEOUT: "timeout"}.get(handle.reason, "stopped")
-            return result
+    def subagent_branch(self, inp: dict[str, Any]) -> dict[str, Any]:
+        """One plan step, in its own branch (several run at the same time).
 
-        results: dict[str, dict[str, Any]] = {}
+        The step can be stopped on its own from the UI (see
+        :mod:`.subagent_control`), stops at its time limit, and stops when the
+        whole run ends (the user pressed Stop or went away).
+        """
+        from alidade.analyst.engine import subagent, subagent_control
+
+        agent = self.agent
+        task = inp["task"]
+        sid = task["step_id"]
+        run_id = task.get("parent_run_id", "")
+        identity = getattr(agent, "identity_id", None)
+        limit = agent.settings.subagent_timeout_s
+        write = _writer()
+        handle = subagent_control.StepHandle()
+        subagent_control.register(identity, run_id, sid, handle)
+        done = threading.Event()
+        run_ended = getattr(agent, "run_ended", None)
+        if run_ended is not None:
+            def watch_run() -> None:
+                while not done.wait(0.2):
+                    if run_ended.is_set():
+                        handle.stop(subagent_control.RUN_ENDED)
+                        return
+            threading.Thread(target=watch_run, daemon=True, name=f"subagent-watch-{sid}").start()
+        slots = _run_slots(run_id, agent.settings.max_parallel)
+        holding = False
+        while not handle.event.is_set():            # queued behind sibling steps
+            if slots.acquire(timeout=0.2):
+                holding = True
+                break
+        timer = threading.Timer(limit, handle.stop, args=(subagent_control.TIMEOUT,))
+        timer.daemon = True
+        started_ms = int(time.time() * 1000)
+        write({"type": "subagent", "step_id": sid, "status": "started", "title": task["title"],
+               "goal": task["goal"], "run_id": run_id, "started_at": started_ms, "timeout_s": limit,
+               "round": task.get("round"), "queued_at": task.get("queued_at"),
+               "max_charts": task["max_actions"]})
+        timer.start()
         try:
-            with ThreadPoolExecutor(max_workers=settings.max_parallel, thread_name_prefix="subagent") as pool:
-                futures = {pool.submit(run_one, t): t["step_id"] for t in tasks}
-                pending = set(futures)
-                while pending:
-                    try:
-                        ev = events.get(timeout=0.2)            # forward from this node's thread only
-                        write(ev)
-                        if ev.get("type") == "subagent" and ev.get("status") == "started":
-                            for s in plan:
-                                if s["id"] == ev["step_id"]:
-                                    s["subagent"] = {**(s.get("subagent") or {}), "status": "running",
-                                                     "started_at": ev["started_at"], "timeout_s": limit}
-                            # the checklist shows the step as running (with its clock)
-                            write({"type": "plan", "steps": [dict(x) for x in plan]})
-                    except queue.Empty:
-                        pass
-                    if run_ended is not None and run_ended.is_set():
-                        for h in handles.values():
-                            h.stop(subagent_control.RUN_ENDED)
-                    for f in [f for f in pending if f.done()]:
-                        pending.discard(f)
-                        sid = futures[f]
-                        try:
-                            results[sid] = f.result()
-                        except Exception as exc:  # noqa: BLE001
-                            results[sid] = {"step_id": sid, "status": "failed", "error": str(exc)[:300],
-                                            "findings": "", "charts": [], "chart_titles": [],
-                                            "completed_steps": [], "duration_s": 0.0}
-                        subagent_control.unregister(identity, run_id, sid)
-            while not events.empty():
-                write(events.get_nowait())
+            result = subagent.run_subtask(agent, task, write, handle.event)
         finally:
-            for sid in handles:
-                subagent_control.unregister(identity, run_id, sid)
+            timer.cancel()
+            done.set()
+            if holding:
+                slots.release()
+            subagent_control.unregister(identity, run_id, sid)
+        if handle.stopped and result["status"] == "stopped":
+            result["status"] = {subagent_control.USER: "cancelled",
+                                subagent_control.TIMEOUT: "timeout"}.get(handle.reason, "stopped")
+        result["started_at"] = started_ms
+        result["round"], result["queued_at"] = task.get("round"), task.get("queued_at")
+        result["max_parallel"] = task.get("max_parallel")
+        # announce the end now — siblings may still be running
+        write({"type": "subagent", "step_id": sid, **_subagent_record(result, run_id)})
+        return {"subagent_results": [result]}
 
+    def merge_step(self, state: AnalystState) -> dict[str, Any]:
+        """All branches of the round are back: record what each sub-agent did on
+        its plan step and report the findings to the main agent."""
+        write = _writer()
+        run_id = state.get("run_id", "")
+        with _SLOTS_LOCK:
+            _SLOTS.pop(run_id, None)
+        tasks = list(state.get("subagent_tasks") or [])
+        results = {r["step_id"]: r for r in state.get("subagent_results") or []}
+        plan = [dict(s) for s in state.get("plan") or []]
+        messages = _copy_messages(state.get("messages") or [])
         charts = list(state.get("charts") or [])
         completed_steps = list(state.get("completed_steps") or [])
         sections = []
         for t in tasks:
-            r = results[t["step_id"]]
+            r = results.get(t["step_id"])
+            if r is None:                    # never happens in practice; keep the round whole
+                r = {"step_id": t["step_id"], "status": "failed", "error": "no result", "findings": "",
+                     "charts": [], "chart_titles": [], "completed_steps": [], "duration_s": None}
+                write({"type": "subagent", "step_id": t["step_id"], **_subagent_record(r, run_id)})
             titles = [x for x in r.get("chart_titles") or [] if x]
-            record = {
-                "status": r["status"], "run_id": run_id,
-                "started_at": next((s.get("subagent", {}).get("started_at") for s in plan
-                                    if s["id"] == t["step_id"]), None) or started_ms,
-                "duration_s": r.get("duration_s"), "charts": len(r.get("chart_titles") or []),
-                "chart_titles": titles, "findings": r.get("findings") or "",
-                **({"error": r["error"]} if r.get("error") else {}),
-            }
-            write({"type": "subagent", "step_id": t["step_id"], **record})
+            record = _subagent_record(r, run_id)
             ok = r["status"] in ("success", "budget_exhausted") and r.get("chart_titles")
             for s in plan:
                 if s["id"] == t["step_id"]:
@@ -702,7 +705,7 @@ class AnalystGraph:
             sections.append(f"### {t['step_id']} — {t['title']} [{r['status']}]\nCharts shown: {shown}\n{body}")
         write({"type": "plan", "steps": [dict(x) for x in plan]})
 
-        dispatched += [t["step_id"] for t in tasks]
+        dispatched = list(state.get("dispatched_steps") or []) + [t["step_id"] for t in tasks]
         messages.append({"role": "user", "content": (
             "[SUBTASK RESULTS] These plan steps were done in parallel by other analysts; their "
             "charts are already shown to the user — do not draw them again.\n\n"
@@ -716,7 +719,7 @@ class AnalystGraph:
         update: dict[str, Any] = {
             "messages": messages, "plan": plan, "charts": charts, "completed_steps": completed_steps,
             "dispatched_steps": dispatched, "subagent_rounds": int(state.get("subagent_rounds") or 0) + 1,
-            "tool_rounds": 0,
+            "tool_rounds": 0, "subagent_tasks": [], "subagent_results": None,
         }
         nxt = {**state, **update}
         update["after_tools"] = "subagents" if self._can_fan_out(nxt, plan) else "agent"
@@ -838,8 +841,49 @@ class AnalystGraph:
         return {"plan": closed} if closed is not None else {}
 
 
+def _subagent_record(r: dict[str, Any], run_id: str) -> dict[str, Any]:
+    """What a plan step keeps (and the UI shows) about the sub-agent that did it."""
+    usage = r.get("usage") or {}
+    return {
+        "status": r["status"], "run_id": run_id, "started_at": r.get("started_at"),
+        **({"round": r["round"]} if r.get("round") else {}),
+        **({"queued_at": r["queued_at"]} if r.get("queued_at") else {}),
+        **({"max_parallel": r["max_parallel"]} if r.get("max_parallel") else {}),
+        **{k: int(usage[k]) for k in ("calls", "prompt_tokens", "cached_tokens", "completion_tokens",
+                                      "tool_calls") if k in usage},
+        "duration_s": r.get("duration_s"), "charts": len(r.get("chart_titles") or []),
+        "chart_titles": [x for x in r.get("chart_titles") or [] if x], "findings": r.get("findings") or "",
+        **({"error": r["error"]} if r.get("error") else {}),
+    }
+
+
+_SLOTS: dict[str, threading.BoundedSemaphore] = {}
+_SLOTS_LOCK = threading.Lock()
+
+
+def _run_slots(run_id: str, limit: int) -> threading.BoundedSemaphore:
+    """How many of a run's sub-agents may work at once (``max_parallel``).
+
+    LangGraph's own ``max_concurrency`` is not used: with a limit of one, its
+    stream worker holds the only slot and the branches never start.
+    """
+    with _SLOTS_LOCK:
+        slots = _SLOTS.get(run_id)
+        if slots is None:
+            if len(_SLOTS) > 256:
+                _SLOTS.clear()
+            slots = _SLOTS[run_id] = threading.BoundedSemaphore(max(1, limit))
+        return slots
+
+
 def _route_after_tools(state: AnalystState) -> str:
-    return state.get("after_tools") or "agent"
+    return "dispatch" if state.get("after_tools") == "subagents" else "agent"
+
+
+def _send_subtasks(state: AnalystState) -> list[Send]:
+    """One ``subagent`` branch per task; LangGraph runs them in parallel (at most
+    ``max_parallel`` work at once, see :func:`_run_slots`) and saves each branch's result as it lands."""
+    return [Send("subagent", {"task": t}) for t in state.get("subagent_tasks") or []]
 
 
 def _user_answers(messages: list[dict[str, Any]], limit: int = 3) -> list[str]:
@@ -853,6 +897,36 @@ def _user_answers(messages: list[dict[str, Any]], limit: int = 3) -> list[str]:
             continue                                        # system notes, skill bodies, results
         answers.append(content.strip()[:300])
     return answers[-limit:]
+
+
+LEAD_CHECKS_CHARS = 2400       # what a sub-agent gets of the lead's earlier checks
+_LEAD_CHECK_TOOLS = ("inspect_source_data", "execute_python_script", "find_insights")
+
+
+def _lead_checks(messages: list[dict[str, Any]], budget: int = LEAD_CHECKS_CHARS) -> list[str]:
+    """Outputs of the data checks the main agent already ran (newest kept
+    first, oldest first in the result), so a sub-agent reuses them instead of
+    repeating them, and filters / cleaning stay the same across steps."""
+    names: dict[str, str] = {}
+    for m in messages:
+        for tc in m.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            names[str(tc.get("id"))] = str(fn.get("name") or "")
+    picked: list[str] = []
+    left = budget
+    for m in reversed(messages):
+        if m.get("role") != "tool" or names.get(str(m.get("tool_call_id"))) not in _LEAD_CHECK_TOOLS:
+            continue
+        text = m.get("content") if isinstance(m.get("content"), str) else ""
+        text = text.strip()
+        if not text or text.startswith(("[ERROR]", "Error")):
+            continue
+        piece = text if len(text) <= min(left, 1200) else text[:min(left, 1200)].rstrip() + " …"
+        picked.append(piece)
+        left -= len(piece)
+        if left < 200:
+            break
+    return list(reversed(picked))
 
 
 def _route(state: AnalystState) -> str:

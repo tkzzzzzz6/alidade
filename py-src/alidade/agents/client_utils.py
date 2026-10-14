@@ -3,6 +3,8 @@ import litellm
 import os
 from types import SimpleNamespace
 
+from alidade import langsmith_tracing
+
 from azure.identity import AzureCliCredential, DefaultAzureCredential, get_bearer_token_provider
 
 
@@ -415,12 +417,19 @@ class Client(object):
                            **params, **(extra or {}))
         if tools is not None:
             call_kwargs["tools"] = tools
-        resp = litellm.completion(**call_kwargs)
-        if is_ollama and tools:
-            resp = _salvage_tool_calls_from_content(resp, tools)
-        if is_ollama and stream:
-            return _synthesize_stream(resp)
-        return resp
+
+        def call():
+            resp = litellm.completion(**call_kwargs)
+            if is_ollama and tools:
+                resp = _salvage_tool_calls_from_content(resp, tools)
+            if is_ollama and stream:
+                return _synthesize_stream(resp)
+            return resp
+
+        # recorded in LangSmith when ALIDADE_LANGSMITH=1 (a plain call otherwise)
+        return langsmith_tracing.traced_call(
+            call, model=self.model, endpoint=self.endpoint, messages=messages, tools=tools,
+            params={**params, **(extra or {})}, stream=stream)
 
     def get_completion(self, messages, stream=False, reasoning_effort="low",
                        **kwargs):

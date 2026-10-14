@@ -108,14 +108,20 @@ def test_plan_steps_record_subagent_findings(workspace, cp_path):  # noqa: F811
     plans = [e["steps"] for e in events if e["type"] == "plan"]
     queued = next(p for p in plans if any(s.get("subagent") for s in p))
     assert queued[0]["subagent"]["status"] == "queued" and queued[0]["subagent"]["run_id"]
-    # each start is pushed to the checklist (status + clock), not only the end
-    running = [p for p in plans if any((x.get("subagent") or {}).get("status") == "running" for x in p)]
-    assert running and all(x["subagent"]["started_at"] > 0 for x in running[0]
-                           if (x.get("subagent") or {}).get("status") == "running")
+    assert queued[0]["subagent"]["round"] == 1 and queued[0]["subagent"]["queued_at"] > 0
+    assert queued[0]["subagent"]["max_parallel"] == RunSettings(subagents=True).max_parallel
+    # each start is announced with what the checklist needs (clock, limit, run)
+    started = sub_events(events, "started")
+    assert {e["step_id"] for e in started} == {"s1", "s2"}
+    assert all(e["started_at"] > 0 and e["timeout_s"] > 0 and e["run_id"] for e in started)
     final = {s["id"]: s for s in plans[-1]}
     rec = final["s1"]["subagent"]
     assert rec["status"] == "success" and rec["findings"] == "A is 40." and rec["chart_titles"] == ["A"]
     assert rec["duration_s"] is not None and rec["started_at"] > 0
+    # what the dispatch panel shows per step: its round, when it was queued, its own model calls
+    assert rec["round"] == 1 and rec["queued_at"] <= rec["started_at"]
+    assert rec["calls"] == 2 and final["s2"]["subagent"]["calls"] == 1
+    assert {"prompt_tokens", "completion_tokens", "cached_tokens", "tool_calls"} <= set(rec)
     ended = [e for e in sub_events(events) if e["status"] != "started"]
     assert {e["step_id"]: e["findings"] for e in ended} == {"s1": "A is 40.", "s2": "B is 30."}
 
