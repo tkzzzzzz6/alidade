@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Alidade 评测一键脚本（macOS / Linux / Git Bash）。Windows 推荐用 eval.ps1 或 eval.bat。
 #
-#   ./eval/eval.sh smoke | new | old | compare | all | report [dir] | help
+#   ./eval/eval.sh smoke | new | old | compare | all | report [dir] | upload <dir>... | help
 #
 # 配置写在 eval/.env（模板 eval/.env.example）；终端里已设置的同名环境变量优先：
 #   EVAL_API_KEY（都没有时会提示输入）  EVAL_MODEL（默认 deepseek-chat）
 #   EVAL_API_BASE（默认 https://api.deepseek.com）  EVAL_ENDPOINT（默认 openai）
 #   EVAL_TAG  EVAL_JOBS=3  EVAL_REPEAT=2  EVAL_ONLY  EVAL_NO_JUDGE=1  EVAL_TIMEOUT=600  EVAL_USER_SIM=1  EVAL_FAST_MODEL  EVAL_STRONG_EFFORT  EVAL_FAST_EFFORT
+#   EVAL_LANGSMITH=1：跑完后也上传到 LangSmith 作为 experiment；upload 子命令上传已有的结果目录（需要 LANGSMITH_API_KEY）
 #   LEGACY_COMMIT（默认：上游 5477f0e2，找不到就用仓库第一个提交）  LEGACY_DIR=../alidade-legacy
 set -euo pipefail
 
@@ -116,7 +117,7 @@ cmd_compare() {
   "$PY" "$EVAL_DIR/report.py" "$OLD_DIR" "$NEW_DIR" --labels 改造前 改造后 --out "$COMPARE_FILE"
 }
 cmd_report()  { "$PY" "$EVAL_DIR/report.py" "${1:-$NEW_DIR}"; }
-cmd_help()    { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+cmd_help()    { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
                 if [ -f "$ENV_FILE" ]; then echo "配置文件：已读取 $ENV_FILE"; else echo "配置文件：未找到 $ENV_FILE（可从 .env.example 复制）"; fi
                 local k="未设置"; [ -n "${EVAL_API_KEY:-}" ] && [ "$EVAL_API_KEY" != "$KEY_PLACEHOLDER" ] && k="已设置"
                 echo "当前配置：endpoint=$ENDPOINT model=$MODEL api-base=$API_BASE tag=$TAG API Key：$k"; }
@@ -129,6 +130,7 @@ case "${1:-help}" in
   compare) cmd_compare ;;
   all) cmd_new; cmd_old; cmd_compare ;;
   report) cmd_report "${2:-}" ;;
+  upload) shift; "$PY" "$EVAL_DIR/langsmith_upload.py" "$@" ;;
   help|-h|--help) cmd_help ;;
   *) echo "未知子命令：$1" >&2; cmd_help; exit 1 ;;
 esac

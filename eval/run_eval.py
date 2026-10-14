@@ -782,6 +782,8 @@ def score(q, events, asks, usage, duration, error, client, args) -> dict[str, An
         "compressions": [{k: c.get(k) for k in ("tokens_before", "tokens_after", "budget", "mode")} for c in compress],
         "summary": summary[:2000],
         "summary_full": summary,
+        # set when the agent traced to LangSmith (ALIDADE_LANGSMITH=1)
+        "trace_id": (completion or {}).get("trace_id"),
         "question": q["question"],
     }
     if args.judge:
@@ -883,6 +885,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fast-model", default=os.environ.get("EVAL_FAST_MODEL", ""),
                    help="model routing: a cheaper model of the same provider for routine steps "
                         "(sets ALIDADE_FAST_MODEL; the --model is the strong one)")
+    p.add_argument("--langsmith", action="store_true", default=os.environ.get("EVAL_LANGSMITH", "").lower() in ("1", "true", "yes"),
+                   help="also upload the results to LangSmith as an experiment (eval/langsmith_upload.py)")
+    p.add_argument("--langsmith-dataset", default=os.environ.get("EVAL_LANGSMITH_DATASET", "alidade-eval"))
     p.add_argument("--out", default="")
     p.add_argument("--worker", default="", help=argparse.SUPPRESS)
     p.add_argument("--worker-out", default="", help=argparse.SUPPRESS)
@@ -943,7 +948,10 @@ def main(argv: list[str] | None = None) -> int:
     logs.mkdir(exist_ok=True)
     (out / "config.json").write_text(json.dumps({
         k: v for k, v in vars(args).items() if k not in ("api_key", "worker", "worker_out")
-    } | {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "questions": len(questions)},
+    } | {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "questions": len(questions),
+         # the agent's switches (e.g. ALIDADE_SUBAGENTS) tell runs of the same code apart
+         "alidade_env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("ALIDADE_")
+                         and not any(h in k for h in ("KEY", "TOKEN", "SECRET", "PASSWORD"))}},
         ensure_ascii=False, indent=2), encoding="utf-8")
 
     env = dict(os.environ)
@@ -1002,6 +1010,13 @@ def main(argv: list[str] | None = None) -> int:
     (out / "report.md").write_text(text, encoding="utf-8")
     print("\n" + text)
     print(f"\nWrote {out / 'runs.jsonl'} and {out / 'report.md'}")
+    if args.langsmith:
+        # the local results are written first and stay the record; an upload failure does not fail the run
+        try:
+            uploader = importlib.import_module("langsmith_upload")
+            uploader.upload_dirs([out], dataset_name=args.langsmith_dataset, replace=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[langsmith] upload failed: {exc} — retry with: python eval/langsmith_upload.py {out}", file=sys.stderr)
     return 0
 
 

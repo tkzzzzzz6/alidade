@@ -305,6 +305,29 @@ python eval/report.py eval/results/new-grounding --recheck-numbers
 | 结论中找不到出处的数字比例 | 找不到出处的数字 ÷ 检查的数字 |
 | 含找不到出处数字的回答比例 | 至少有一个这种数字的回答 ÷ 有检查结果的回答 |
 
+## 上传到 LangSmith 对比（可选）
+
+本地的 `runs.jsonl` / `report.md` 仍然是评测的依据。上传只是把同样的结果放到 LangSmith 上，用它的实验对比页并排看几次运行：按题、按重复次数逐行对比，各项分数是列，可以点开看每次的回答。
+
+```powershell
+# 上传已有的结果（可以一次传多个，最后会打印一个对比链接）
+.\eval\eval.ps1 upload -Run eval\results\new-sub-off3,eval\results\new-sub-on3,eval\results\new-sub-on4
+# 或者跑完自动上传
+.\eval\eval.ps1 new -Only planned,multiangle -Jobs 1 -Repeat 3 -Tag sub-on5 -LangSmith
+```
+
+macOS / Linux：`./eval/eval.sh upload eval/results/new-sub-off3 eval/results/new-sub-on4`，跑完自动上传用 `EVAL_LANGSMITH=1`。也可以直接 `python eval/langsmith_upload.py <目录>...`。
+
+- 需要 `LANGSMITH_API_KEY`：从环境变量、`eval/.env`、项目根目录的 `.env` 依次找（自托管或欧洲区再设 `LANGSMITH_ENDPOINT`）。
+- **数据集**（默认 `alidade-eval`，`--dataset` / `EVAL_LANGSMITH_DATASET` 可改）：每道题一个样例，输入是题目，参考输出是这道题的检查条件（`mentions_any`、`answer_number`、`note` 等）。按题目 id 对应，所以每次上传都落在同一批样例上，实验才能对齐；`questions.yaml` 里改过的题会同步更新。
+- **实验**：每个结果目录一个，名字就是目录名（如 `new-sub-on4`），元数据里有模型、重复次数和当时的 `ALIDADE_*` 开关（从这次起 `config.json` 会记录这些开关，比如 `ALIDADE_SUBAGENTS`；更早的运行里没有）。同名实验已存在时会报错，加 `-Replace` / `--replace` 覆盖；`-LangSmith` 自动上传时总是覆盖同名实验，和本地目录被覆盖一致。
+- **每次运行的分数**（feedback）：`success`、`completed`、`chart_ok`、`mentions_ok`、`clarified_first`、`intent_ok`、`judge`、`unsupported_numbers`，以及 `duration_s`、`llm_calls`、`total_tokens_k`、`output_tokens_k`、`uncached_input_tokens_k`（单位千 token：LangSmith 的分数上限是 99,999）、`charts`、`subagents`、`cost`（有 `EVAL_PRICES` 时）。分数先按当前规则重新判一遍，和 `report.md` 一致。
+- **超过 24 小时的结果**：LangSmith 只接收 24 小时内开始的运行，所以更早的结果目录会整体平移到上传前一分钟结束（每次运行的耗时和间隔不变）；真实时间记在每次运行的元数据 `ran_at` 和实验的 `ran_from` / `ran_to` 里。
+- 上传是同步的，被拒绝的运行或分数会逐条列出，最后以失败退出；改好后加 `-Replace` 重传。
+- 被测的 Agent 自己也打开了追踪（`ALIDADE_LANGSMITH=1`）时，每次运行的元数据里有它的 `trace_id`，可以从实验跳到完整的调用过程。
+- 上传的内容：题目、数据集名、Agent 的结论和图表标题、分数和 token 数。不上传 API Key、表格数据和提示词。
+- 上传失败不影响本地结果；`run_eval.py --langsmith` 失败时会打印重试命令。
+
 ## 指标怎么算
 
 | 指标 | 计算方式 |

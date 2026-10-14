@@ -10,7 +10,10 @@
       compare  对比 old 和 new，生成 eval/results/compare-<Tag>.md
       all      依次执行 new、old、compare
       report   汇总一次运行（默认 new-<Tag>，可用 -Run 指定目录）
+      upload   把运行结果上传到 LangSmith 作为 experiment（-Run 指定目录，可多个，逗号分隔）
       help     显示帮助
+
+    加 -LangSmith 时，new / old / smoke 跑完后也会自动上传（需要 LANGSMITH_API_KEY）。
 
     配置和 API Key 从 eval\.env 读取（模板见 eval\.env.example）；终端里已设置的同名
     环境变量优先。都没有 API Key 时会提示输入（只在本次运行内有效）。
@@ -23,11 +26,13 @@
     .\eval\eval.ps1 new -Model qwen-plus -ApiBase https://dashscope.aliyuncs.com/compatible-mode/v1
 .EXAMPLE
     .\eval\eval.ps1 new -Only trap -Repeat 1 -NoJudge
+.EXAMPLE
+    .\eval\eval.ps1 upload -Run eval\results\new-sub-off3,eval\results\new-sub-on4
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('smoke', 'new', 'old', 'compare', 'all', 'report', 'help')]
+    [ValidateSet('smoke', 'new', 'old', 'compare', 'all', 'report', 'upload', 'help')]
     [string]$Command = 'help',
 
     # 模型配置；不传时依次取：终端环境变量 → eval\.env → 默认值（DeepSeek）
@@ -43,6 +48,10 @@ param(
     [switch]$NoJudge,
     # 模拟用户：带 intent 的题由一个 LLM 扮演用户回答反问，并按用户真实意图判分
     [switch]$UserSim,
+    # 跑完后把结果上传到 LangSmith 作为 experiment（本地结果照常写）
+    [switch]$LangSmith,
+    # upload 时覆盖同名 experiment
+    [switch]$Replace,
     # 模型分工：日常步骤用这个更便宜的模型（同一服务商），-Model 是强模型
     [string]$FastModel = '',
     # 按思考强度分工：关键步骤 / 常规步骤的 reasoning effort（如 high / low），可以和 -FastModel 一起用
@@ -57,8 +66,8 @@ param(
     [string]$LegacyCommit = '',
     [string]$LegacyDir = '',
 
-    # report 子命令要汇总的目录
-    [string]$Run = '',
+    # report / upload 子命令的结果目录（upload 可以给多个，逗号分隔）
+    [string[]]$Run = @(),
 
     # 配置文件（KEY=VALUE），默认 eval\.env
     [string]$EnvFile = ''
@@ -66,6 +75,7 @@ param(
 
 # PowerShell 把不加引号的 a,b,c 当成数组：合并回逗号分隔的字符串
 $Only = (@($Only) | Where-Object { $_ }) -join ','
+$RunDirs = @(@($Run) | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -178,6 +188,7 @@ function Invoke-Eval {
     if ($OnlyIds) { $argsList += @('--only', $OnlyIds) }
     if ($Judge) { $argsList += '--judge' }
     if ($UserSim) { $argsList += '--user-sim' }
+    if ($LangSmith) { $argsList += '--langsmith' }
     if ($FastModel) { $argsList += @('--fast-model', $FastModel) }
     if ($StrongEffort) { $argsList += @('--strong-effort', $StrongEffort) }
     if ($FastEffort) { $argsList += @('--fast-effort', $FastEffort) }
@@ -232,9 +243,20 @@ function Run-Compare {
 }
 
 function Run-Report {
-    $dir = if ($Run) { $Run } else { $NewDir }
+    $dir = if ($RunDirs.Count -gt 0) { $RunDirs[0] } else { $NewDir }
     if (-not (Test-Path $dir)) { throw "找不到结果目录：$dir" }
     Invoke-Python @((Join-Path $EvalDir 'report.py'), $dir)
+}
+
+function Run-Upload {
+    $dirs = if ($RunDirs.Count -gt 0) { $RunDirs } else { @($NewDir) }
+    foreach ($dir in $dirs) {
+        if (-not (Test-Path (Join-Path $dir 'runs.jsonl'))) { throw "找不到 $dir\runs.jsonl" }
+    }
+    Write-Step "上传到 LangSmith：$($dirs -join ', ')"
+    $argsList = @((Join-Path $EvalDir 'langsmith_upload.py')) + $dirs
+    if ($Replace) { $argsList += '--replace' }
+    Invoke-Python $argsList
 }
 
 Push-Location $Root
@@ -246,6 +268,7 @@ try {
         'compare' { Run-Compare }
         'all'     { Run-New; Run-Old; Run-Compare }
         'report'  { Run-Report }
+        'upload'  { Run-Upload }
         default   { Show-Help }
     }
 } finally {

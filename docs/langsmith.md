@@ -54,6 +54,10 @@ LANGSMITH_API_KEY=lsv2_...
 3. 动作选 **Add to dataset**（例如新建数据集 `alidade-bad-answers`），或者 **Add to annotation queue** 先人工看一遍；
 4. 之后被点 👎 的运行会自动进这个数据集，它的输入（问题和表）可以挑出来加进 `eval/` 的回归题。
 
+## 评测结果对比
+
+`eval/` 的评测结果可以作为实验上传到 LangSmith，在网页上并排对比几次运行（例如子 Agent 关 / 开）：`.\eval\eval.ps1 upload -Run eval\results\new-sub-off3,eval\results\new-sub-on4`。说明见 [eval/README.md](../eval/README.md#上传到-langsmith-对比可选)。评测的判分和报告仍以本地为准。
+
 ## 注意
 
 - **数据会发到 LangSmith**：trace 里有完整的提示词，包括表的摘要和样例行、用户的问题。数据敏感时只在开发 / 评测环境打开，或者用 LangSmith 自带的 `LANGSMITH_HIDE_INPUTS=true` / `LANGSMITH_HIDE_OUTPUTS=true` 隐藏输入输出。

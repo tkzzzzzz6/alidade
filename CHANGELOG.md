@@ -50,6 +50,7 @@ is kept in [docs/upstream/CHANGELOG.md](docs/upstream/CHANGELOG.md).
 - Each eval question runs with its own `ALIDADE_HOME`, so the user's real rules, definitions and traces never leak into a run.
 - Multi-angle questions (two independent analyses in one request) with duration, LLM-call and parallel-plan metrics.
 - Harder questions: dirty data (string amounts, mixed date formats, duplicates), multi-table joins, and questions that must be clarified first; numeric and multi-part answer checks.
+- Eval results can be uploaded to LangSmith as experiments (`eval/langsmith_upload.py`, `eval.ps1 upload -Run a,b` or `-LangSmith` / `--langsmith` after a run) to compare runs side by side there: one dataset example per question, one experiment per results directory, grades and costs as feedback. Local `runs.jsonl` / `report.md` stay the record; `config.json` now also records the `ALIDADE_*` switches of the run.
 
 ### Interface
 - **Run traces**: every run records its model calls (model, routing tier and why, time, tokens and cache hits), tool calls, charts, chart checks and sub-agents; a timeline viewer in the toolbar shows them.
