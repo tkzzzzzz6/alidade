@@ -178,9 +178,10 @@ def build_lightweight_table_context(
         table_name = table['name']
         label = _table_label(table)
         try:
-            df = workspace.read_data_as_df(table_name)
+            from alidade.analyst.engine import table_access
+            df, total_rows, sampled = table_access.read_for_summary(workspace, table_name)
             data_file_path = workspace.get_relative_data_file_path(table_name)
-            num_rows = len(df)
+            num_rows = total_rows if total_rows is not None else len(df)
             description = table_desc_cache.get(table_name, "")
             column_descriptions = col_desc_cache.get(table_name, {})
 
@@ -201,6 +202,8 @@ def build_lightweight_table_context(
                 f"{label} (file: {data_file_path}, {num_rows:,} rows)",
                 f"  Columns: {', '.join(col_info)}",
             ]
+            if sampled:
+                lines.append("  " + table_access.sampled_note(num_rows, len(df)))
 
             if description:
                 lines.append(f"  Description: {description}")
@@ -244,19 +247,25 @@ def build_lightweight_table_context(
             # Basic numeric stats to reduce exploratory tool calls
             numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
             if numeric_cols:
+                cols = numeric_cols[:8]
+                # exact over the whole file when the df above is only a sample
+                exact = table_access.numeric_stats(workspace, table_name, cols) if sampled else {}
                 stats_parts = []
-                for col in numeric_cols[:8]:
-                    stats_parts.append(
-                        f"    {col}: min={df[col].min()}, max={df[col].max()}, "
-                        f"mean={df[col].mean():.2f}"
-                    )
+                for col in cols:
+                    st = exact.get(col)
+                    if st is not None:
+                        stats_parts.append(f"    {col}: min={st['min']}, max={st['max']}, mean={st['mean']:.2f}")
+                    else:
+                        stats_parts.append(
+                            f"    {col}: min={df[col].min()}, max={df[col].max()}, mean={df[col].mean():.2f}")
                 lines.append("  Numeric stats:\n" + "\n".join(stats_parts))
 
             # Whole-table problems the samples above can't show (duplicates,
             # numbers/dates stored as text, label variants, missing values).
             quality = data_quality_notes(df)
             if quality:
-                lines.append("  Data quality check (automatic, whole table) — handle these before computing:\n"
+                scope = f"from the first {len(df):,} rows" if sampled else "whole table"
+                lines.append(f"  Data quality check (automatic, {scope}) — handle these before computing:\n"
                              + "\n".join(f"    - {note}" for note in quality))
 
             return "\n".join(lines)

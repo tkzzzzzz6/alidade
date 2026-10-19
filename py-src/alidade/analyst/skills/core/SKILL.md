@@ -222,6 +222,7 @@ The following reference material applies when you call the `visualize` tool.
 - **Prefer plain pandas** for most tasks — it's simpler and more readable.
 - Only use DuckDB when the dataset is very large and you need efficient SQL aggregations, filtering, joins, or window functions.
 - You can combine both: DuckDB for initial loading/filtering on large files, then pandas for complex operations.
+- **Large tables** (shown as "large table (N rows)" in [CONTEXT], schema/samples given from a sample): do NOT read the whole file into pandas. Aggregate with DuckDB **over the file path**, e.g. `duckdb.sql("SELECT region, SUM(amount) AS total FROM 'sales.parquet' GROUP BY region").df()`, and bring only the small result into pandas. DuckDB reads the full file efficiently; loading millions of rows into a DataFrame is slow and may exhaust memory.
 
 **Code structure:** standalone script (no function wrapper), imports at top. `visualize` code runs in a **fresh namespace** — it cannot see variables from `execute_python_script`, and it is re-run on its own whenever the user refreshes the data — so it must load its inputs itself and be fully self-contained. **CRITICAL:** The final result DataFrame MUST be assigned to the exact variable name you specified in `"output_variable"` — the system uses this name to extract the result. For example, if your output_variable is `sales_by_region`, the script must contain `sales_by_region = ...`.
 

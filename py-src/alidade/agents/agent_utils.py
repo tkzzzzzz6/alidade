@@ -639,8 +639,13 @@ def generate_data_summary(
         table_name = table['name']
         description = table_desc_cache.get(table_name, "")
 
+        total_rows = None
+        sampled = False
         try:
-            df = workspace.read_data_as_df(table_name)
+            # Large tables are summarised from a bounded sample + their true row
+            # count, not a full load (see analyst.engine.table_access).
+            from alidade.analyst.engine import table_access
+            df, total_rows, sampled = table_access.read_for_summary(workspace, table_name)
         except (FileNotFoundError, KeyError) as exc:
             _logger.info("Table %s not in workspace, trying inline rows", table_name)
             inline_rows = table.get("rows")
@@ -661,7 +666,8 @@ def generate_data_summary(
         except (FileNotFoundError, KeyError):
             data_file_path = "(in-memory)"
 
-        num_rows = len(df)
+        shown_rows = len(df)
+        num_rows = total_rows if total_rows is not None else shown_rows
         num_cols = len(df.columns)
 
         sections = []
@@ -674,6 +680,9 @@ def generate_data_summary(
             header += f" ({num_rows:,} rows × {num_cols} columns)"
         sections.append(header)
         sections.append(f"- **file path:** `{data_file_path}`")
+        if sampled:
+            from alidade.analyst.engine import table_access
+            sections.append(table_access.sampled_note(num_rows, shown_rows))
         sections.append("")
 
         if description:

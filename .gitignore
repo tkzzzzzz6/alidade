@@ -426,4 +426,8 @@ package-lock.json
 # Evaluation outputs (per-question logs can be large)
 eval/results/*/logs/
 
+# Big-data benchmark/eval table (generate with eval/data/make_large.py)
+eval/data/large_sales.parquet
+
 .claude/skills/live-panel/
+eval/results/

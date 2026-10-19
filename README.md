@@ -44,6 +44,8 @@
 - **数据体检**：读表时报告重复行、数字存成文本、日期格式混杂、空值等问题，Agent 先清洗再计算。
 - **图表自检**：图表在展示前要通过一组规则检查（未聚合的折线、类别或线条过多、空数据等）。不通过就退回给模型修正，最多重试 2 次。
 - **数字溯源**：结论里的每个数字都能追到本次运行打印的结果、图表数据或原始表；评测里统计找不到出处的比例。
+- **沙箱执行**：模型写的代码在沙箱里跑——禁止写文件、禁止读工作区以外、禁止起进程和联网，并有内存和时间上限；DuckDB / PyArrow 的原生文件读写也被拦（[docs/sandbox.md](docs/sandbox.md)）。
+- **大数据**：行数很多的表不整表读进内存——真实行数和数字统计用 DuckDB 直接从文件算，schema 和样例取抽样，并提示模型用 DuckDB SQL 聚合、只取小结果（`ALIDADE_BIGDATA`，默认开；[docs/plans/large-data.md](docs/plans/large-data.md)）。
 
 **主动发现洞察**
 
@@ -109,11 +111,14 @@ alidade
 | `OPENAI_API_KEY` / `OPENAI_MODELS` 等 | 服务端预置的模型，见 `.env.template`；也可以在界面里添加自定义模型 |
 | `ALIDADE_HOME` | 数据目录，默认 `~/.alidade`（会话、工作区、日志、检查点） |
 | `ALIDADE_AGENT_CONTEXT_BUDGET` | 上下文压缩的 token 预算，默认 60000 |
-| `SANDBOX` | 代码执行方式：`local`（默认）或 `docker` |
+| `SANDBOX` | 代码执行方式：`local`（默认，进程内沙箱）或 `docker`（容器隔离） |
+| `ALIDADE_SANDBOX_TIMEOUT` | 单次代码执行的墙钟上限，默认 120 秒 |
+| `ALIDADE_SANDBOX_MEMORY_MB` | 单个工作进程的内存上限，默认 4096（`0` = 不限） |
 | `ALIDADE_SUBAGENTS` | 设为 `1` 打开并行子 Agent（默认关）；`ALIDADE_MAX_SUBAGENTS` 同时运行几个（默认 3）。也可以在"设置 → Agent"里按次调整 |
 | `ALIDADE_FAST_MODEL` | 按任务分配模型：常规步骤用的小模型（同一服务商） |
 | `ALIDADE_DEFINITIONS` | 记住用户口径，默认开（`0` 关闭） |
 | `ALIDADE_LANGSMITH` | 设为 `1` 并配好 `LANGSMITH_API_KEY` 后，把 LangGraph 节点和每次模型调用上报到 LangSmith，默认关闭，见 [docs/langsmith.md](docs/langsmith.md) |
+| `ALIDADE_BIGDATA` | 大表走 DuckDB（抽样建摘要 + 用 SQL 聚合），默认开；`ALIDADE_BIGDATA_ROWS`（阈值，默认 20 万）、`ALIDADE_BIGDATA_SAMPLE`（抽样行数，默认 5 万） |
 
 ## 架构
 
@@ -144,13 +149,14 @@ alidade
 | `analyst/engine/subagent.py` | 子 Agent 运行器 |
 | `analyst/engine/routing.py` | 按任务分配模型 |
 | `analyst/engine/number_check.py` | 结论数字溯源 |
+| `analyst/engine/table_access.py` | 大表：不整表载入的摘要与聚合 |
 | `analyst/engine/insights.py` | 统计洞察扫描 |
 | `mcp_server.py` | MCP 服务器 |
 | `src/app/dispatchView.ts` | 分发面板的状态（纯函数，实时和回放共用） |
 
 ## 评测
 
-`eval/` 里有一套用真实模型跑的评测：61 道题、13 类（查询、趋势、多步、陷阱图、模糊、必须先澄清、脏数据、多表关联、数字溯源、多角度、三步计划、口径记忆、洞察），统计成功率、结论正确率、反问行为、token、缓存命中、耗时和估算费用，并能和改造前的版本自动对比；带隐藏意图的题可以由 LLM 扮演用户回答反问。用法见 [eval/README.md](eval/README.md)，分析报告见 `eval/analysis-*.md`。
+`eval/` 里有一套用真实模型跑的评测：64 道题、14 类（查询、趋势、多步、陷阱图、模糊、必须先澄清、脏数据、多表关联、数字溯源、多角度、三步计划、口径记忆、洞察、大数据），统计成功率、结论正确率、反问行为、token、缓存命中、耗时和估算费用，并能和改造前的版本自动对比；带隐藏意图的题可以由 LLM 扮演用户回答反问。用法见 [eval/README.md](eval/README.md)，分析报告见 `eval/analysis-*.md`。
 
 主要结果（DeepSeek deepseek-flash，每题 2–3 次，样本不大，引用时注明）：
 
@@ -164,6 +170,7 @@ alidade
 | 洞察扫描（合成数据基准，50 张表） | 规律明显时 6 类全部找到、噪声列零误报；完全没有规律的表 1/50 报了 1 条 |
 | 思考强度（难题组，全部 low 对比默认 high） | 正确率不变，输出 token −25%，耗时 −14% |
 | 并行子 Agent（8 道多角度 / 三步题 × 3） | 正确率不变，但平均耗时没有下降、token +38%：子 Agent 冷启动和汇总的开销抵消了并行节省，所以默认关闭（分析见 [docs/plans/parallel-subagents.md](docs/plans/parallel-subagents.md)） |
+| 大表走 DuckDB（300 万行，3 题 × 2，开 vs 关） | 正确率不变 100%、LLM 评分 5.0；平均每题耗时 57s → 32s（约 1.8×）；总 token 持平甚至略增（+7%）——省的是服务端时间 / 内存，不是模型 token（[docs/plans/large-data.md](docs/plans/large-data.md)） |
 
 ## 测试
 

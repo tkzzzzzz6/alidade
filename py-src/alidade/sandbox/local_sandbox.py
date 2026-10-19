@@ -5,12 +5,30 @@
 
 The script runs with the workspace directory as its working directory
 so user scripts access files via e.g. ``pd.read_csv("sample.csv")``.
+
+What confines model-written code here (see ``docs/sandbox.md``):
+
+* an audit hook in the worker: no file writes, no reads or directory
+  listings outside the workspace (and the Python libraries), no file
+  deletion / renaming / new directories, no processes, no network, no
+  ctypes, secrets scrubbed from the environment;
+* guards for libraries that do file I/O in native code (DuckDB, PyArrow),
+  which the audit hook cannot see (``guards.py``);
+* resource limits enforced by the host: wall-clock time
+  (``ALIDADE_SANDBOX_TIMEOUT``, default 120 s) and memory
+  (``ALIDADE_SANDBOX_MEMORY_MB``, default 4096). A worker over either limit
+  is killed; a persistent session then continues in a fresh worker and the
+  caller is told its variables are gone.
+
+This is a guard rail for generated analysis code, not a security boundary
+for code written to escape; for that use ``SANDBOX=docker``.
 """
 
 import atexit
 import logging
 import os
 import threading
+import time
 import warnings
 from multiprocessing import Pipe, Process
 from sys import addaudithook
@@ -91,6 +109,10 @@ def _warm_worker_loop(conn):
         import pyarrow  # noqa: F401
         import pyarrow.parquet  # noqa: F401
         import pyarrow.dataset  # noqa: F401
+        import pyarrow.csv  # noqa: F401
+        import pyarrow.json  # noqa: F401
+        import pyarrow.feather  # noqa: F401
+        import pyarrow.ipc  # noqa: F401
     except ImportError:
         pass
     try:
@@ -102,6 +124,55 @@ def _warm_worker_loop(conn):
     except ImportError:
         pass
 
+    # Low-level process / socket modules that something above may have
+    # loaded: drop them from the module cache so model code has to import
+    # them again, and that import is refused by the hook below.
+    for _mod in ("_posixsubprocess", "subprocess"):
+        _sys.modules.pop(_mod, None)
+
+    # Native-code file I/O (DuckDB, PyArrow) never reaches the audit hook:
+    # wrap those libraries before any model code runs.
+    from alidade.sandbox import guards as _guards
+    _guards.install()
+
+    # Directories Python itself may list while importing a module.
+    _import_dirs = tuple(
+        (os.path.realpath(p) if p else os.path.realpath(".")) + os.sep
+        for p in _sys.path if isinstance(p, str)
+    )
+    _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+
+    def _path_text(p):
+        if isinstance(p, bytes):
+            return p.decode(errors="replace")
+        if isinstance(p, os.PathLike):
+            p = os.fspath(p)
+            return p.decode(errors="replace") if isinstance(p, bytes) else p
+        return p if isinstance(p, str) else None
+
+    def _inside_allowed(path_text, extra=()):
+        resolved = os.path.realpath(path_text)
+        probe = resolved if resolved.endswith(os.sep) else resolved + os.sep
+        ws = _allowed_workspace[0]
+        return ((ws is not None and probe.startswith(ws))
+                or probe.startswith(_allowed_lib_prefixes)
+                or probe.startswith(extra)
+                or resolved in _allowed_runtime_files)
+
+    # File system changes model code never needs (pandas/numpy transforms
+    # only read). Raised as OSError, which the import system tolerates when
+    # it cannot write a bytecode cache.
+    _blocked_fs_events = frozenset({
+        "os.remove", "os.rmdir", "os.rename", "os.mkdir", "os.chmod", "os.chown",
+        "os.link", "os.symlink", "os.truncate", "os.utime", "os.chflags", "os.lchflags",
+        "os.setxattr", "os.removexattr", "os.mkfifo", "os.mknod",
+    })
+    _blocked_process_events = frozenset({
+        "os.system", "os.exec", "os.spawn", "os.posix_spawn", "os.fork", "os.forkpty",
+        "os.kill", "os.killpg", "os.startfile", "os.putenv", "os.unsetenv",
+        "_winapi.CreateProcess", "_posixsubprocess.fork_exec",
+    })
+
     # Install audit hooks once -- they persist for the process lifetime.
     def block_mischief(event, arg):
         if type(event) != str:
@@ -109,6 +180,24 @@ def _warm_worker_loop(conn):
         # Block file writes (only allow reading)
         if event == "open" and type(arg[1]) == str and arg[1] not in ("r", "rb"):
             raise IOError("file write forbidden")
+        # os.open() reports no mode string, only flags: check those, and the
+        # path like any other read.
+        if event == "open" and arg[1] is None:
+            flags = arg[2] if len(arg) > 2 and isinstance(arg[2], int) else 0
+            if flags & _WRITE_FLAGS:
+                raise IOError("file write forbidden")
+            path_text = _path_text(arg[0])
+            if (path_text is not None and _allowed_workspace[0] is not None
+                    and not _inside_allowed(path_text)):
+                raise IOError(f"file read outside workspace forbidden: {path_text}")
+        if event in _blocked_fs_events:
+            raise IOError(f"file system change forbidden in sandbox ({event})")
+        # Listing folders outside the workspace leaks what is on the machine.
+        if (event in ("os.listdir", "os.scandir", "glob.glob", "glob.glob/2")
+                and _allowed_workspace[0] is not None and arg):
+            path_text = _path_text(arg[0]) if arg[0] is not None else "."
+            if path_text is not None and not _inside_allowed(path_text, _import_dirs):
+                raise IOError(f"listing folders outside workspace forbidden: {path_text}")
         # Restrict file reads to the workspace directory during code execution.
         # Always allow reads from Python library directories (stdlib, site-packages).
         if (event == "open" and type(arg[1]) == str and arg[1] in ("r", "rb")
@@ -127,12 +216,7 @@ def _warm_worker_loop(conn):
         # to _blocked_prefixes because libraries like pandas/numpy rely
         # on safe os.* audit events (os.listdir, os.scandir, os.stat)
         # that share the same prefix.
-        _blocked_os_events = frozenset({
-            "os.system", "os.exec", "os.spawn", "os.fork",
-            "os.kill", "os.killpg", "os.startfile",
-            "os.putenv", "os.unsetenv",
-        })
-        if event in _blocked_os_events:
+        if event in _blocked_process_events:
             raise IOError("dangerous os operation forbidden in sandbox")
         # Block network access — code should only transform data, not
         # make outbound connections (prevents data exfiltration).
@@ -147,7 +231,8 @@ def _warm_worker_loop(conn):
         if event == "import" and type(arg[0]) == str:
             _blocked_modules = ("subprocess", "shutil", "socket", "http",
                                 "urllib", "requests", "ctypes", "multiprocessing",
-                                "signal", "resource")
+                                "signal", "resource", "_posixsubprocess", "_socket",
+                                "ssl", "ftplib", "smtplib", "telnetlib", "pty")
             mod_name = arg[0].split(".")[0]
             if mod_name in _blocked_modules:
                 if mod_name == "ctypes" and "ctypes" in _sys.modules:
@@ -189,9 +274,10 @@ def _warm_worker_loop(conn):
             _ws = os.path.realpath(workspace_path)
             if not _ws.endswith(os.sep):
                 _ws += os.sep
-            _allowed_workspace[0] = _ws
         else:
-            _allowed_workspace[0] = None
+            _ws = None
+        _guards.begin(_ws)
+        _allowed_workspace[0] = _ws
 
         # Change working directory to workspace before executing user
         # code.  Done here (not via a code preamble) so that ``import os``
@@ -218,10 +304,12 @@ def _warm_worker_loop(conn):
             # file writes, network access, subprocess spawning, and dangerous imports.
             exec(code, namespace)  # nosec  # codeql[py/code-injection]
         except Exception as err:
-            conn.send({"status": "error", "error_message": f"Error: {type(err).__name__} - {err}"})
+            _guards.end()
             _allowed_workspace[0] = None
+            conn.send({"status": "error", "error_message": f"Error: {type(err).__name__} - {err}"})
             continue
 
+        _guards.end()
         _allowed_workspace[0] = None
 
         result_objs = {k: namespace[k] for k in allowed_objects}
@@ -241,6 +329,90 @@ def _warm_worker_loop(conn):
         conn.send(response_msg)
 
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Resource limits (enforced by the host while it waits for the worker)
+# ---------------------------------------------------------------------------
+
+DEFAULT_MEMORY_MB = 4096
+_POLL_S = 0.1
+_warned_no_memory_probe = [False]
+
+
+def execution_timeout() -> int:
+    """``ALIDADE_SANDBOX_TIMEOUT`` in seconds (read per call so it can be set per run)."""
+    try:
+        return max(1, int(os.environ.get("ALIDADE_SANDBOX_TIMEOUT", "120")))
+    except ValueError:
+        return 120
+
+
+def memory_limit_mb() -> int:
+    """``ALIDADE_SANDBOX_MEMORY_MB`` (0 = no limit)."""
+    try:
+        return max(0, int(os.environ.get("ALIDADE_SANDBOX_MEMORY_MB", DEFAULT_MEMORY_MB)))
+    except ValueError:
+        return DEFAULT_MEMORY_MB
+
+
+def _rss_mb(pid: int) -> float | None:
+    """Resident memory of *pid* in MB (None when it cannot be measured here)."""
+    try:
+        import psutil
+        return psutil.Process(pid).memory_info().rss / 2**20
+    except ImportError:
+        pass
+    except Exception:  # noqa: BLE001 — process just exited
+        return None
+    try:   # Linux without psutil
+        with open(f"/proc/{pid}/status", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except OSError:
+        pass
+    if not _warned_no_memory_probe[0]:
+        _warned_no_memory_probe[0] = True
+        logger.warning("[Sandbox] psutil is not installed: the sandbox memory limit is not enforced")
+    return None
+
+
+def _await_result(proc, conn, timeout: float) -> tuple[str, object]:
+    """Wait for the worker's reply while watching its time and memory.
+
+    The memory limit is on what THIS execution adds, measured from the
+    worker's resident memory just before the code ran. A pooled worker that
+    is already large from preloaded libraries or earlier steps is not killed
+    for an innocent step; a step that itself allocates past the limit is.
+
+    Returns ``("ok", reply)``, ``("timeout", seconds)`` or ``("memory", mb)``;
+    on the last two the caller must discard the worker.
+    """
+    limit = memory_limit_mb()
+    baseline = (_rss_mb(proc.pid) or 0.0) if limit else 0.0
+    deadline = time.monotonic() + timeout
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return "timeout", timeout
+        if conn.poll(min(_POLL_S, left)):
+            return "ok", conn.recv()
+        if not proc.is_alive():
+            raise EOFError(f"worker exited (exit code {proc.exitcode})")
+        if limit:
+            rss = _rss_mb(proc.pid)
+            if rss is not None and rss - baseline > limit:
+                return "memory", rss - baseline
+
+
+def _limit_message(kind: str, value: object) -> str:
+    if kind == "timeout":
+        return (f"Code execution timed out after {int(float(value))}s and was stopped "
+                f"(limit: ALIDADE_SANDBOX_TIMEOUT).")
+    return (f"Code used more than {memory_limit_mb()} MB of memory ({float(value):.0f} MB) and was stopped "
+            f"(limit: ALIDADE_SANDBOX_MEMORY_MB). Work on fewer rows or columns, aggregate first "
+            f"(e.g. in DuckDB), or avoid building large intermediate tables.")
 
 
 class _WarmWorkerPool:
@@ -319,6 +491,10 @@ class _WarmWorkerPool:
 _worker_pool = _WarmWorkerPool(size=2)
 
 
+RESTART_NOTE = (" The Python session was restarted: variables from earlier steps are gone,"
+                " so load or recompute what you need.")
+
+
 class SandboxSession:
     """A session that keeps the Python namespace alive across multiple executions.
 
@@ -333,6 +509,7 @@ class SandboxSession:
     def __init__(self):
         self._proc, self._conn = _worker_pool.acquire()
         self._closed = False
+        self.restarts = 0       # workers killed for exceeding a limit (or crashing)
 
     # -- public API --------------------------------------------------------
 
@@ -345,34 +522,41 @@ class SandboxSession:
         """
         if self._closed:
             return {"status": "error", "error_message": "Session is closed"}
+        if self._proc is None:          # the last worker was killed: continue in a fresh one
+            self._proc, self._conn = _worker_pool.acquire()
         try:
             self._conn.send((code, {**allowed_objects}, workspace_path, True))
-            if self._conn.poll(timeout=self.EXECUTION_TIMEOUT):
-                return self._conn.recv()
-            # Timed out — kill and discard the worker
-            _worker_pool.discard(self._proc, self._conn)
-            self._closed = True
-            return {
-                "status": "error",
-                "error_message": f"Code execution timed out after {self.EXECUTION_TIMEOUT}s",
-            }
+            kind, value = _await_result(self._proc, self._conn, execution_timeout())
+            if kind == "ok":
+                return value
+            self._replace_worker()
+            self.restarts += 1
+            return {"status": "error", "error_message": _limit_message(kind, value) + RESTART_NOTE,
+                    "limit": kind}
         except Exception as e:
-            exit_code = self._proc.exitcode
-            _worker_pool.discard(self._proc, self._conn)
-            self._closed = True
+            exit_code = self._proc.exitcode if self._proc is not None else None
+            self._replace_worker()
+            self.restarts += 1
             return {
                 "status": "error",
                 "error_message": (
                     f"Worker communication failed: {type(e).__name__}: {e} "
-                    f"(worker exit code: {exit_code})"
+                    f"(worker exit code: {exit_code})" + RESTART_NOTE
                 ),
             }
+
+    def _replace_worker(self) -> None:
+        if self._proc is not None:
+            _worker_pool.discard(self._proc, self._conn)
+        self._proc, self._conn = None, None
 
     def close(self):
         """Clear the persistent namespace and return the worker to the pool."""
         if self._closed:
             return
         self._closed = True
+        if self._proc is None:
+            return
         try:
             self._conn.send("__clear_ns__")
             if self._conn.poll(timeout=5):
@@ -578,19 +762,12 @@ class LocalSandbox(Sandbox):
         proc, conn = _worker_pool.acquire()
         try:
             conn.send((code, {**allowed_objects}, workspace_path))
-            # Enforce a wall-clock timeout to prevent runaway code
-            if conn.poll(timeout=LocalSandbox.EXECUTION_TIMEOUT):
-                result = conn.recv()
-            else:
-                # Timed out — kill and discard the worker
+            # Enforce the time and memory limits; a worker over either is killed
+            kind, value = _await_result(proc, conn, execution_timeout())
+            if kind != "ok":
                 _worker_pool.discard(proc, conn)
-                return {
-                    "status": "error",
-                    "content": (
-                        f"Code execution timed out after "
-                        f"{LocalSandbox.EXECUTION_TIMEOUT}s"
-                    ),
-                }
+                return {"status": "error", "content": _limit_message(kind, value), "limit": kind}
+            result = value
             _worker_pool.release(proc, conn)
             return result
         except Exception as e:

@@ -33,6 +33,11 @@
 #                            there, a figure the model "knows" from memory, or
 #                            arithmetic done in its head); every number in the
 #                            answer must be traceable to the run
+#                bigdata   — a millions-of-rows table; a pure aggregate whose
+#                            result is tiny. Tests the DuckDB large-table path
+#                            (ALIDADE_BIGDATA): run it on and off to compare
+#                            tokens / time. Generate the data with
+#                            eval/data/make_large.py first.
 #   dataset    a key in `datasets`, or a list of keys (all loaded into the workspace)
 #   question   what the user types
 #   chart      true if the run must show at least one chart
@@ -88,6 +93,11 @@ datasets:
   continents:
     file: data/country_continent.csv
     table: country_continent
+  # millions of rows — generate with `python eval/data/make_large.py` first
+  # (the parquet is git-ignored). Used by the `bigdata` questions.
+  bigsales:
+    file: data/large_sales.parquet
+    table: large_sales
 
 questions:
   # ── Gas prices ──────────────────────────────────────────────────────────
@@ -666,3 +676,28 @@ questions:
       2000–2010 年 14 个行业的失业人数全部上升，Mining and Extraction 增幅最大（约 +316%）；
       2008–2009 年金融危机期间失业人数和失业率明显跳升；行业间失业率差异大（Agriculture 最高、Government 最低）。
 
+
+  # ── Big data (millions of rows; run ALIDADE_BIGDATA on vs off) ──────────────
+  - id: bigdata-region-sales
+    dataset: bigsales
+    category: bigdata
+    question: 这张销售表里，各地区（region）的总销售额（quantity × price）是多少？用柱状图展示。
+    chart: true
+    mentions_any: ["region", "地区", "各地区", "销售额"]
+    note: 纯聚合，结果 5 行（5 个地区）。考察大表是否用 DuckDB 聚合而不是整表读进 pandas。
+  - id: bigdata-top-category
+    dataset: bigsales
+    category: bigdata
+    question: 哪个品类（category）的总利润最高？利润 = quantity ×（price − cost）。给出该品类并画出各品类总利润的对比图。
+    chart: true
+    mentions_any: ["Technology", "科技", "技术"]
+    note: >-
+      数据按 Technology 利润率最高（0.42，其余 ≤0.30）生成，所以总利润最高的品类稳定是 Technology。
+      纯聚合，结果 6 行。
+  - id: bigdata-monthly-trend
+    dataset: bigsales
+    category: bigdata
+    question: 按月统计总销售额（quantity × price）的变化趋势，画一张折线图。
+    chart: true
+    mentions_any: ["月", "month", "2021", "2022", "趋势", "trend"]
+    note: 纯聚合（按月分组），结果约 48 行（4 年 × 12 月）。

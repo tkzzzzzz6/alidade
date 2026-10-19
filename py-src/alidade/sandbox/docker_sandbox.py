@@ -145,6 +145,10 @@ class DockerSandbox(Sandbox):
                 "--memory", "512m",
                 "--cpus", "1",
                 "--pids-limit", "256",
+                # no network, no extra kernel privileges for the code inside
+                "--network", "none",
+                "--cap-drop", "ALL",
+                "--security-opt", "no-new-privileges",
             ]
 
             # Only set an explicit user on platforms that support os.getuid/os.getgid
