@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# A newer push to the same branch/PR cancels the in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest
+
+      - name: Run backend tests
+        # Offline unit/integration suite — no model API keys are available in CI,
+        # so tests that need a live model are marked `live` and skip themselves.
+        run: pytest tests/backend -q
+
+  frontend:
+    name: frontend build + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install node-canvas native deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev
+
+      - name: Set up Node
+        # Match the Node major the lockfile and desktop build are developed on
+        # (Vite 7 needs >= 20.19; the repo is developed on 24.x).
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # The repo ships a Yarn 4 (berry) lockfile, but the runner's preinstalled
+      # `yarn` is 1.x and cannot read it. Corepack honours the `packageManager`
+      # field in package.json, so this makes CI use the pinned Yarn 4.
+      - name: Enable Corepack (Yarn 4)
+        run: |
+          corepack enable
+          yarn --version
+
+      - name: Restore Yarn cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.yarn/berry/cache
+          key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            yarn-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build frontend
+        run: yarn build
+
+      - name: Run frontend tests
+        run: yarn test
+
+  lint:
+    name: ruff (errors only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint for real errors
+        # Minimal, low-noise rule set: syntax errors, undefined names, broken
+        # f-strings. Keeps CI green on an existing codebase while still catching
+        # genuine breakage. Widen the selection as the code gets tidied.
+        run: ruff check --select E9,F63,F7,F82 py-src eval

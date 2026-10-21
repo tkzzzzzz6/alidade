@@ -76,6 +76,9 @@ dependencies = [
 # challenge that a plain HTTP fetch cannot pass. After installing, also run:
 #   python -m playwright install chromium
 browser = ["playwright>=1.40"]
+# Native desktop window (pywebview over the OS WebView). Enables `alidade --desktop`
+# and is bundled into the PyInstaller desktop build (see packaging/ and docs/desktop.md).
+desktop = ["pywebview>=5.0"]
 
 [project.urls]
 Homepage = "https://github.com/microsoft/data-formulator"
@@ -107,4 +110,6 @@ alidade-mcp = "alidade.mcp_server:main"
 dev-dependencies = [
     "build",
     "pytest",
+    "pyinstaller>=6.0",  # desktop packaging (packaging/alidade.spec)
+    "ruff",              # lint (see .github/workflows/ci.yml)
 ]

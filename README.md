@@ -8,6 +8,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/tkzzzzzz6/alidade/actions/workflows/ci.yml"><img src="https://github.com/tkzzzzzz6/alidade/actions/workflows/ci.yml/badge.svg" alt="CI"></a>&ensp;
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>&ensp;
   <img src="https://img.shields.io/badge/agent-LangGraph-1F3A5F" alt="LangGraph">&ensp;
   <img src="https://img.shields.io/badge/models-LiteLLM-E8743B" alt="LiteLLM">&ensp;
@@ -72,7 +73,7 @@
 
 ## 快速开始
 
-需要 Python 3.11+、Node.js 18+、[uv](https://docs.astral.sh/uv/)（推荐）和 Yarn 1.x。
+需要 Python 3.11+、Node.js 20.19+、[uv](https://docs.astral.sh/uv/)（推荐）和 Yarn 4.x（用 `corepack enable` 启用，版本已钉在 `package.json` 的 `packageManager` 里）。
 
 **Windows (PowerShell)**
 
@@ -103,6 +104,15 @@ alidade
 ```
 
 开发时可以用 `yarn start` 启动带热更新的前端，再用 `alidade --dev` 启动后端。更多选项见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+
+**桌面窗口**：装上桌面依赖后,可以用一个原生窗口(系统自带 WebView,不打包 Chromium)代替浏览器标签页运行:
+
+```bash
+uv pip install -e ".[desktop]"   # 或 pip install "alidade[desktop]"
+alidade --desktop
+```
+
+还可以用 PyInstaller 打包成跨平台的桌面程序,打 `v*` tag 由 GitHub Actions 自动出三平台产物。详见 [docs/desktop.md](docs/desktop.md)。
 
 ### 配置
 
@@ -187,7 +197,7 @@ yarn test                           # 前端（vitest）
 - 新增先澄清、口径记忆、数据体检、数字溯源、统计洞察扫描、按任务分配模型、并行子 Agent 与分发面板、运行轨迹、LangSmith 集成、MCP 服务器和评测框架。
 - 反问附带上下文和推荐选项；Agent 运行时输入框可用，消息可以排队。
 - 修复了空工作区中运行 Agent 的问题。
-- 删除了桌面打包、Azure Blob 工作区、Kusto 的 Microsoft 登录、Superset 连接器和上游的 CI 与宣传素材。
+- 删除了上游的桌面打包、Azure Blob 工作区、Kusto 的 Microsoft 登录、Superset 连接器和上游的 CI 与宣传素材;改为一套自己的轻量方案——基于 pywebview 的桌面窗口与 PyInstaller 打包([docs/desktop.md](docs/desktop.md)),以及 GitHub Actions 的 CI 和跨平台发布流水线。
 - 项目更名：包名 `alidade`、命令 `alidade`、环境变量 `ALIDADE_*`、数据目录 `~/.alidade`。
 
 ### 从旧版本迁移

@@ -1,0 +1,128 @@
+name: Release (desktop builds)
+
+# Tag a release to trigger cross-platform desktop builds:
+#   git tag v0.1.0 && git push origin v0.1.0
+# Or run it by hand from the Actions tab (workflow_dispatch).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create/update the GitHub Release and upload assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: Alidade-Windows
+          - os: macos-latest
+            asset: Alidade-macOS
+          - os: ubuntu-latest
+            asset: Alidade-Linux
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- frontend (must exist at py-src/alidade/dist before packaging) -----
+      - name: Install node-canvas native deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # The repo ships a Yarn 4 (berry) lockfile; the runner's preinstalled yarn
+      # is 1.x. Corepack honours `packageManager` in package.json.
+      - name: Enable Corepack (Yarn 4)
+        run: |
+          corepack enable
+          yarn --version
+
+      - name: Restore Yarn cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.yarn/berry/cache
+          key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            yarn-${{ runner.os }}-
+
+      - name: Build frontend
+        run: |
+          yarn install --immutable
+          yarn build
+
+      # ---- python + pywebview backend ---------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # pywebview's Linux backend needs WebKitGTK + GObject introspection.
+      # (macOS uses Cocoa/pyobjc and Windows uses Edge WebView2 — both pulled in
+      # by pip, so only Linux needs system packages.)
+      - name: Install pywebview GTK deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-0 libglib2.0-0 \
+            gir1.2-gtk-3.0 gir1.2-webkit2-4.1 \
+            libwebkit2gtk-4.1-0 libgirepository1.0-dev
+
+      - name: Install package + build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[desktop]" pyinstaller
+          # PyGObject's build needs the GI headers installed above; it is only a
+          # build-time requirement on Linux (macOS/Windows get pyobjc/WebView2
+          # wheels from pip).
+          if [ "${{ runner.os }}" = "Linux" ]; then pip install pygobject; fi
+        shell: bash
+
+      - name: Build desktop app
+        run: pyinstaller packaging/alidade.spec --noconfirm
+
+      # ---- package the dist/ folder into one archive ------------------------
+      # Both branches keep the top-level `Alidade/` folder so the three platform
+      # archives unpack to the same layout.
+      - name: Archive (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/Alidade -DestinationPath "${{ matrix.asset }}-${{ github.ref_name }}.zip"
+        shell: pwsh
+
+      - name: Archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd dist
+          zip -r "../${{ matrix.asset }}-${{ github.ref_name }}.zip" Alidade
+        shell: bash
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}-${{ github.ref_name }}
+          path: ${{ matrix.asset }}-${{ github.ref_name }}.zip
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}-${{ github.ref_name }}.zip
+          draft: true
+          generate_release_notes: true

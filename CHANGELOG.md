@@ -62,8 +62,14 @@ is kept in [docs/upstream/CHANGELOG.md](docs/upstream/CHANGELOG.md).
 - New name, icon, About page and attribution.
 - Threads in the data-thread panel fold and unfold from their header. A folded thread shows how many steps and charts it holds and its latest question, and keeps a dot while it is still running; the choice is remembered per thread in the browser, and a thread opens again when you focus into it.
 
+### Packaging & CI
+- **Desktop app** (`alidade --desktop`, `desktop` extra): a native window over the OS WebView via pywebview — the Flask server runs on a background thread and the window loads it, no bundled Chromium. Chosen over Electron/Tauri because the app's logic is a Python backend, so those would still ship Python plus their own runtime; pywebview rides the same PyInstaller toolchain. See `docs/desktop.md`.
+- **PyInstaller build** (`packaging/alidade.spec`): bundles the Python backend and the built frontend into a one-folder desktop app; heavy optional cloud connectors are excluded to keep the artifact's size down (re-includable in the spec).
+- **GitHub Actions CI** (`.github/workflows/ci.yml`): backend tests (Python 3.11/3.12), frontend build + vitest, and an errors-only ruff lint, on every push and PR.
+- **Release pipeline** (`.github/workflows/release.yml`): a `v*` tag builds the desktop app on Windows, macOS and Linux and uploads each as a draft GitHub Release.
+
 ### Removed
-- Desktop packaging, Microsoft CI and repo files, marketing media.
+- Upstream desktop packaging, Microsoft CI and repo files, marketing media (replaced by the pywebview desktop app and GitHub Actions above).
 - Azure Blob workspace backend, Kusto Microsoft sign-in, the Superset connector.
 
 ### Renamed

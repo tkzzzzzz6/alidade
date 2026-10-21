@@ -485,12 +485,69 @@ def parse_args() -> argparse.Namespace:
         help="Alidade home directory for workspaces and sessions (default: ~/.alidade)")
     parser.add_argument("--dev", action='store_true', default=False,
         help="Launch the app in development mode (prevents the app from opening the browser automatically)")
+    parser.add_argument("--desktop", action='store_true',
+        default=os.environ.get('ALIDADE_DESKTOP') == '1',
+        help="Open Alidade in a native desktop window (pywebview) instead of a browser tab. "
+             "Requires the 'desktop' extra: pip install \"alidade[desktop]\".")
     parser.add_argument("--workspace-backend", type=str,
         default=os.environ.get('WORKSPACE_BACKEND', 'local'),
         choices=['local', 'ephemeral'],
            help="Workspace storage backend: 'local' (default, durable filesystem without TTL cleanup) "
                "or 'ephemeral' (temporary server-local storage with TTL/LRU cleanup)")
     return parser.parse_args()
+
+
+def _wait_for_server(host: str, port: int, timeout: float = 20.0) -> bool:
+    """Block until the local server accepts a TCP connection (or timeout)."""
+    import socket
+    connect_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            if s.connect_ex((connect_host, port)) == 0:
+                return True
+        time.sleep(0.2)
+    return False
+
+
+def _run_desktop(url: str, args: argparse.Namespace) -> None:
+    """Serve Flask on a background thread and show a native pywebview window.
+
+    pywebview must own the main thread (required on macOS), so the WSGI server
+    runs in a daemon thread. When the window closes, webview.start() returns,
+    the main thread ends, the daemon server dies with it, and the process exits.
+    """
+    try:
+        import webview  # pywebview
+    except ImportError:
+        print(
+            "Desktop mode needs pywebview, which is not installed.\n"
+            "  Install it:   pip install \"alidade[desktop]\"\n"
+            "  Or drop --desktop to open Alidade in your browser instead.",
+            file=sys.stderr, flush=True,
+        )
+        raise SystemExit(1)
+
+    server = threading.Thread(
+        target=lambda: app.run(
+            host=args.host, port=args.port,
+            debug=False, use_reloader=False, threaded=True,
+        ),
+        daemon=True,
+    )
+    server.start()
+
+    if not _wait_for_server(args.host, args.port):
+        print("Server did not start in time; aborting desktop window.",
+              file=sys.stderr, flush=True)
+        raise SystemExit(1)
+
+    webview.create_window(
+        "Alidade", url,
+        width=1440, height=900, min_size=(960, 640),
+    )
+    webview.start()
 
 
 def run_app():
@@ -537,9 +594,15 @@ def run_app():
     _register_blueprints()
 
     url = "http://localhost:{0}".format(args.port)
+
+    if args.desktop:
+        print(f"Ready! Opening Alidade in a desktop window ({url}).", flush=True)
+        _run_desktop(url, args)
+        return
+
     print(f"Ready! Open {url} in your browser.", flush=True)
-    
-    if not args.dev and os.environ.get('ALIDADE_DESKTOP') != '1':
+
+    if not args.dev:
         threading.Timer(1.5, lambda: webbrowser.open(url, new=2)).start()
 
     debug_mode = args.dev
