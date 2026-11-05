@@ -1,12 +1,13 @@
 ---
-description: Use Yarn only, never npm/pnpm
+description: Use Yarn 4 (via Corepack) only, never npm/pnpm
 globs: package.json, yarn.lock
 alwaysApply: true
 ---
 
 # Package Manager Rules
 
-- Use Yarn v1.22.22 only - never use npm or pnpm
-- Never manually edit yarn.lock
-- Keep yarn.lock changes minimal when adding deps
+- The repo pins Yarn 4 in `package.json` (`"packageManager": "yarn@4.18.1"`). Run
+  `corepack enable` once, then use `yarn` — never npm, pnpm, or a global Yarn 1.
+- Install in CI / clean checkouts with `yarn install --immutable`.
+- Never manually edit yarn.lock; keep its changes minimal when adding deps.
 - Registry must be https://registry.yarnpkg.com
