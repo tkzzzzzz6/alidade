@@ -26,11 +26,12 @@ for code written to escape; for that use ``SANDBOX=docker``.
 
 import atexit
 import logging
+import multiprocessing
 import os
 import threading
 import time
 import warnings
-from multiprocessing import Pipe, Process
+from multiprocessing.process import BaseProcess as Process
 from sys import addaudithook
 
 import pandas as pd
@@ -432,8 +433,13 @@ class _WarmWorkerPool:
         atexit.register(self.shutdown)
 
     def _spawn(self) -> tuple[Process, object]:
-        parent_conn, child_conn = Pipe()
-        p = Process(target=_warm_worker_loop, args=(child_conn,), daemon=True)
+        # Always "spawn": on Linux the default is "fork", and forking a process
+        # that already runs other threads (LangGraph executors, the memory
+        # watchdog, Flask request threads) can copy a held lock into the child,
+        # which then blocks forever. Windows/macOS already default to spawn.
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe()
+        p = ctx.Process(target=_warm_worker_loop, args=(child_conn,), daemon=True)
         p.start()
         return p, parent_conn
 
